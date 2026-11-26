@@ -77,7 +77,11 @@ class CDP {
         );
       }
       if (message.method === "Log.entryAdded" && message.params?.entry?.level === "error") {
-        this.consoleErrors.push(message.params.entry.text);
+        const entry = message.params.entry;
+        /* a failed subresource carries its address in entry.url; without it the
+           message is just "Failed to load resource: 404" and nobody can tell
+           which file went missing. */
+        this.consoleErrors.push(entry.url ? `${entry.text} (${entry.url})` : entry.text);
       }
     });
   }
@@ -316,10 +320,52 @@ async function waitForBoardCount(min, timeout = 12000) {
   return count;
 }
 
+/* The extra tools (table, minimap, lasso) live behind one overflow button in
+   the drawing-tools row, so every test that used to click their own buttons
+   opens the menu and picks the row by its Thai label. */
+async function openToolsMenu() {
+  await cdp.click(".tools-more");
+  await cdp.waitFor(`!!document.querySelector(".tools-more-menu")`, { label: "tools menu open" });
+}
+
+async function closeToolsMenu() {
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 53,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 53,
+  });
+  await cdp.waitFor(`!document.querySelector(".tools-more-menu")`, { label: "tools menu closed" });
+}
+
+async function pickTool(label) {
+  await openToolsMenu();
+  const picked = await cdp.evaluate(`(() => {
+    const row = [...document.querySelectorAll(".tools-more-row")]
+      .find((b) => b.querySelector(".tools-more-label")?.textContent === ${JSON.stringify(label)});
+    if (!row) return false;
+    row.click();
+    return true;
+  })()`);
+  if (!picked) throw new Error(`tools menu has no row labelled ${label}`);
+  await cdp.waitFor(`!document.querySelector(".tools-more-menu")`, { label: `tools menu closed after ${label}` });
+}
+
+async function toolRowState(label) {
+  await openToolsMenu();
+  const state = await cdp.evaluate(`(() => {
+    const row = [...document.querySelectorAll(".tools-more-row")]
+      .find((b) => b.querySelector(".tools-more-label")?.textContent === ${JSON.stringify(label)});
+    return row ? { checked: row.getAttribute("aria-checked"), hint: row.querySelector(".tools-more-hint")?.textContent } : null;
+  })()`);
+  await closeToolsMenu();
+  return state;
+}
+
 async function openEditor(boardId = BOARD) {
   await cdp.navigate(`${BASE}/b/${boardId}`);
   await cdp.waitFor(
-    `!!window.__boardsApi && !!document.querySelector(".presence") && !!document.querySelector(".tools-table") && !document.querySelector(".bar") && !document.body.textContent.includes("กำลังโหลดกระดาน")`,
+    `!!window.__boardsApi && !!document.querySelector(".presence") && !!document.querySelector(".tools-more") && !document.querySelector(".bar") && !document.body.textContent.includes("กำลังโหลดกระดาน")`,
     { label: "editor ready" },
   );
 }
@@ -585,7 +631,7 @@ async function openEditor(boardId = BOARD) {
     await sleep(250);
 
     const tablePlacement = await cdp.evaluate(`(() => {
-      const table = document.querySelector(".tools-table");
+      const table = document.querySelector(".tools-more");
       const stack = document.querySelector(".App-toolbar .Stack_horizontal");
       const tools = document.querySelector(".App-toolbar").getBoundingClientRect();
       const native = document.querySelector(".App-toolbar .ToolIcon_size_medium")?.getBoundingClientRect();
@@ -598,7 +644,7 @@ async function openEditor(boardId = BOARD) {
         label: table ? table.getAttribute("aria-label") : null,
       };
     })()`);
-    check("table button moved into the drawing tools row", tablePlacement.inStack && tablePlacement.insideTools, JSON.stringify(tablePlacement));
+    check("the extra tools button moved into the drawing tools row", tablePlacement.inStack && tablePlacement.insideTools, JSON.stringify(tablePlacement));
     const boardButtons = await cdp.evaluate(`(() => {
       const slot = document.querySelector(".tools-table-slot");
       const row = document.querySelector(".App-toolbar").getBoundingClientRect();
@@ -609,15 +655,41 @@ async function openEditor(boardId = BOARD) {
       return { count: all.length, all, vw: innerWidth };
     })()`);
     check(
-      "the board tools (table, minimap, lasso) share the slot and stay inside the row",
-      boardButtons.count === 3 && boardButtons.all.every((b) => b.inside && b.w > 20),
+      "one overflow button replaces the three extra tools in the row",
+      boardButtons.count === 1 && boardButtons.all[0].cls.includes("tools-more") && boardButtons.all.every((b) => b.inside && b.w > 20),
       JSON.stringify(boardButtons),
     );
     check(
-      "table button matches the native tool size",
+      "the overflow button matches the native tool size",
       Math.abs((tablePlacement.w ?? 0) - (tablePlacement.nativeW ?? 29)) < 1.5 &&
         Math.abs((tablePlacement.h ?? 0) - (tablePlacement.nativeH ?? 29)) < 1.5,
       JSON.stringify(tablePlacement),
+    );
+
+    await openToolsMenu();
+    const menuBox = await cdp.evaluate(`(() => {
+      const menu = document.querySelector(".tools-more-menu");
+      const trigger = document.querySelector(".tools-more");
+      const r = menu.getBoundingClientRect();
+      const t = trigger.getBoundingClientRect();
+      return {
+        rows: [...menu.querySelectorAll(".tools-more-row")].map((b) => b.querySelector(".tools-more-label").textContent),
+        role: menu.getAttribute("role"),
+        expanded: trigger.getAttribute("aria-expanded"),
+        inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+        under: r.top >= t.bottom - 1,
+      };
+    })()`);
+    check(
+      "the overflow menu lists the extra tools under its button",
+      menuBox.rows.join("|") === "สร้างตาราง|แผนที่ย่อ|เลือกแบบบ่วง" &&
+        menuBox.role === "menu" && menuBox.expanded === "true" && menuBox.inside && menuBox.under,
+      JSON.stringify(menuBox),
+    );
+    await closeToolsMenu();
+    check(
+      "Escape closes the overflow menu without touching the board",
+      (await cdp.evaluate(`!document.querySelector(".tools-more-menu") && document.querySelector(".tools-more").getAttribute("aria-expanded") === "false"`)) === true,
     );
 
     const presenceBox = await cdp.evaluate(`(() => {
@@ -664,7 +736,7 @@ async function openEditor(boardId = BOARD) {
     const inertClosed = await cdp.evaluate(`document.querySelector(".panel").hasAttribute("inert")`);
     check("closed table panel is inert", inertClosed === true, inertClosed);
     const beforeTable = await boardElementCount();
-    await cdp.click(".tools-table");
+    await pickTool("สร้างตาราง");
     await cdp.waitFor(`document.querySelector(".panel")?.classList.contains("open")`, {
       label: "table panel open",
     });
@@ -673,14 +745,11 @@ async function openEditor(boardId = BOARD) {
       const r = p.getBoundingClientRect();
       return r.right <= innerWidth + 1 && r.left >= 0;
     })()`, { label: "table panel slides in" });
-    const tableActive = await cdp.evaluate(`(() => {
-      const t = document.querySelector(".tools-table");
-      return { active: t.classList.contains("active"), pressed: t.getAttribute("aria-pressed"), bg: getComputedStyle(t).backgroundColor };
-    })()`);
+    const tableRow = await toolRowState("สร้างตาราง");
     check(
-      "drawing tools button shows the open panel",
-      tableActive.active && tableActive.pressed === "true" && /rgba\(99, 96, 217/.test(tableActive.bg),
-      JSON.stringify(tableActive),
+      "the menu row shows the table panel is open",
+      tableRow?.checked === "true",
+      JSON.stringify(tableRow),
     );
     const panelGlass = await cdp.evaluate(`(() => {
       const panel = document.querySelector(".panel");
@@ -706,8 +775,8 @@ async function openEditor(boardId = BOARD) {
       label: "table panel close",
     });
     check(
-      "drawing tools button clears when the panel closes",
-      (await cdp.evaluate(`document.querySelector(".tools-table").classList.contains("active")`)) === false,
+      "the menu row clears when the panel closes",
+      (await toolRowState("สร้างตาราง"))?.checked === "false",
     );
 
     /* -------------------------------------------------------- save status */
@@ -870,7 +939,7 @@ async function openEditor(boardId = BOARD) {
     const mobilePresence = await cdp.evaluate(`(() => {
       const p = document.querySelector(".presence");
       const r = p.getBoundingClientRect();
-      const table = document.querySelector(".tools-table");
+      const table = document.querySelector(".tools-more");
       const tools = document.querySelector(".App-toolbar").getBoundingClientRect();
       const t = table ? table.getBoundingClientRect() : null;
       const vw = document.documentElement.clientWidth;
@@ -894,8 +963,8 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(mobilePresence),
     );
     check(
-      "phones use Excalidraw's own mobile row without the board buttons",
-      (await cdp.evaluate(`document.querySelectorAll(".App-toolbar .tools-table").length`)) === 0,
+      "phones use Excalidraw's own mobile row without the extra tools button",
+      (await cdp.evaluate(`document.querySelectorAll(".App-toolbar .tools-more").length`)) === 0,
       JSON.stringify(mobilePresence),
     );
     check(
@@ -1317,7 +1386,7 @@ async function openEditor(boardId = BOARD) {
     await openEditor(REL_BOARD);
     await sleep(500);
 
-    await cdp.click('button[aria-label="เปิดตัวสร้างตาราง"]');
+    await pickTool("สร้างตาราง");
     await cdp.waitFor(`document.querySelector(".panel")?.classList.contains("open")`, {
       label: "relation table panel",
     });

@@ -611,6 +611,108 @@ body {
   background: var(--accent-soft);
   color: var(--accent);
 }
+
+/* One overflow button keeps the row to the drawing tools; table, minimap and
+   lasso open from here (the same idea as Excalidraw's own "More tools"). */
+.tools-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  border: 0;
+  border-radius: 6.5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  touch-action: none;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.tools-more:hover {
+  background: rgba(0, 0, 0, 0.055);
+}
+.tools-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.tools-more.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tools-more-menu {
+  position: fixed;
+  z-index: 70;
+  padding: 6px;
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  background: var(--frost);
+  box-shadow: var(--float-shadow);
+  color: var(--ink);
+  font-size: 12.5px;
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+}
+.tools-more-cap {
+  margin: 2px 5px 5px;
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+.tools-more-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 32px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tools-more-row:hover {
+  background: var(--frost-hover);
+}
+.tools-more-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tools-more-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  color: var(--muted);
+}
+.tools-more-label {
+  flex: 1 1 auto;
+}
+.tools-more-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.tools-more-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: var(--accent);
+}
+.tools-more-row.active {
+  color: var(--accent);
+}
+.tools-more-row.active .tools-more-icon {
+  color: var(--accent);
+}
 .shell.tools-collapsed .canvas .excalidraw .App-toolbar.tools-floating {
   display: none;
 }
@@ -1145,9 +1247,10 @@ code {
 
 /* phones: keep the card small and clear of the zoom footer */
 @media (max-width: 560px) {
-  /* the tools row fits the table button and nothing more: two extra 29px
-     buttons push the fold control past the island edge, so the minimap and
-     lasso toggles step aside and the card folds to its pill instead. */
+  /* phones keep Excalidraw's own row: every extra entry point (table, minimap,
+     lasso and now the overflow button) steps aside so the fold control stays
+     inside the island. */
+  .tools-more,
   .tools-minimap,
   .tools-lasso {
     display: none;

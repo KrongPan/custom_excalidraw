@@ -11,7 +11,7 @@ import { viewportCoordsToSceneCoords } from "@excalidraw/excalidraw";
 const LASSO_COLOR = "#6965db";
 const HINT = "ลากเส้นรอบสิ่งที่ต้องการเลือก · Esc เพื่อยกเลิก";
 
-const IconLasso = () => (
+export const IconLasso = () => (
   <svg
     width={17}
     height={17}
@@ -85,8 +85,27 @@ function collectSelection(elements, polygon) {
   return ids;
 }
 
-export default function LassoTool({ apiRef, canvasRef, host }) {
-  const [armed, setArmed] = useState(false);
+export default function LassoTool({
+  apiRef,
+  canvasRef,
+  host,
+  armed: armedProp,
+  onArmedChange,
+  showButton = true,
+}) {
+  const [armedLocal, setArmedLocal] = useState(false);
+  /* The owner may drive the mode (the overflow menu does) or let the component
+     own it (the standalone button did). One state either way. */
+  const controlled = armedProp !== undefined;
+  const armed = controlled ? armedProp : armedLocal;
+  const setArmed = useCallback(
+    (next) => {
+      const value = typeof next === "function" ? next(controlled ? armedProp : armedLocal) : next;
+      if (controlled) onArmedChange?.(value);
+      else setArmedLocal(value);
+    },
+    [controlled, armedProp, armedLocal, onArmedChange],
+  );
   const [points, setPoints] = useState([]);
   const dragRef = useRef(null);
 
@@ -94,7 +113,7 @@ export default function LassoTool({ apiRef, canvasRef, host }) {
     dragRef.current = null;
     setPoints([]);
     setArmed(false);
-  }, []);
+  }, [setArmed]);
 
   /* Escape leaves the scene alone: no drag, no selection change. Picking
      another tool in the toolbar leaves lasso mode too, the way a real tool
@@ -268,7 +287,8 @@ export default function LassoTool({ apiRef, canvasRef, host }) {
 
   return (
     <>
-      {host &&
+      {showButton &&
+        host &&
         createPortal(
           <button
             type="button"
