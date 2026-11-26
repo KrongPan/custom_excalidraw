@@ -125,7 +125,8 @@ export function classRowBounds(elements, gridId, section, index) {
   const spec = readClassSpec(elements, gridId);
   if (!spec || spec.collapsed) return null;
   const lines = section === "fields" ? spec.fields : section === "methods" ? spec.methods : [];
-  if (!Number.isInteger(index) || index < 0 || index >= lines.length) return null;
+  if (!Number.isInteger(index) || index < 0) return null;
+  if (lines.length === 0 ? index !== 0 : index >= lines.length) return null;
   const fieldsH = sectionHeight(spec.fields);
   const top =
     section === "fields"
@@ -143,6 +144,24 @@ export function classRowBounds(elements, gridId, section, index) {
   };
 }
 
+/** Remove one or more selected rows from a class spec. */
+export function removeClassRows(spec, rows) {
+  const fields = [...(spec.fields || [])];
+  const methods = [...(spec.methods || [])];
+  const remove = (list, indices) => {
+    for (const index of [...indices].sort((a, b) => b - a)) list.splice(index, 1);
+  };
+  remove(
+    fields,
+    (rows || []).filter((row) => row.section === "fields").map((row) => row.index),
+  );
+  remove(
+    methods,
+    (rows || []).filter((row) => row.section === "methods").map((row) => row.index),
+  );
+  return { fields, methods };
+}
+
 /** Which fields/methods row is under a scene point, or null. */
 export function classRowAt(elements, gridId, x, y) {
   const frame = findClassFrame(elements, gridId);
@@ -152,12 +171,20 @@ export function classRowAt(elements, gridId, x, y) {
   if (!spec || spec.collapsed) return null;
   const fieldsH = sectionHeight(spec.fields);
   const fieldsTop = frame.y + HEADER_H + PAD_TOP;
-  if (y >= fieldsTop && y < fieldsTop + spec.fields.length * LINE_H) {
+  if (spec.fields.length === 0) {
+    if (y >= fieldsTop && y < fieldsTop + LINE_H) {
+      return classRowBounds(elements, gridId, "fields", 0);
+    }
+  } else if (y >= fieldsTop && y < fieldsTop + spec.fields.length * LINE_H) {
     const index = Math.floor((y - fieldsTop) / LINE_H);
     return classRowBounds(elements, gridId, "fields", index);
   }
   const methodsTop = frame.y + HEADER_H + fieldsH + PAD_TOP;
-  if (y >= methodsTop && y < methodsTop + spec.methods.length * LINE_H) {
+  if (spec.methods.length === 0) {
+    if (y >= methodsTop && y < methodsTop + LINE_H) {
+      return classRowBounds(elements, gridId, "methods", 0);
+    }
+  } else if (y >= methodsTop && y < methodsTop + spec.methods.length * LINE_H) {
     const index = Math.floor((y - methodsTop) / LINE_H);
     return classRowBounds(elements, gridId, "methods", index);
   }

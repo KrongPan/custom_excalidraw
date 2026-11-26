@@ -11,6 +11,7 @@ import {
   describeClass,
   healClass,
   isClassGrid,
+  removeClassRows,
   toggleClass,
   updateClass,
 } from "./class.js";
@@ -294,7 +295,7 @@ export default function App() {
   const [erPanelOpen, setErPanelOpen] = useState(false);
   const [selectedGrid, setSelectedGrid] = useState(null);
   const [selectedClass, setSelectedClass] = useState(null);
-  const [activeClassRow, setActiveClassRow] = useState(null);
+  const [activeClassRows, setActiveClassRows] = useState([]);
   const [selectedRelation, setSelectedRelation] = useState(null);
   const [activeCell, setActiveCell] = useState(null);
   const [peers, setPeers] = useState([]);
@@ -1136,12 +1137,16 @@ export default function App() {
   // different context and closes. Closing the ER panel manually stays closed
   // until another class is selected.
   useEffect(() => {
+    // keep a row that belongs to the newly selected class (the pointerdown
+    // handler sets it first), but clear targets left over from another class
+    setActiveClassRows((prev) =>
+      prev.length && prev[0].grid === (selectedClass?.grid ?? null) ? prev : [],
+    );
     if (selectedClass) {
       setErPanelOpen(true);
       setPanelOpen(false);
     } else {
       setErPanelOpen(false);
-      setActiveClassRow(null);
     }
   }, [selectedClass?.grid]);
 
@@ -1738,8 +1743,9 @@ export default function App() {
       if (!spec) return;
       const key = section === "fields" ? "fields" : "methods";
       const lines = [...(spec[key] || [])];
+      const insertAt = Math.min(Math.max(0, index + 1), lines.length);
       lines.splice(
-        Math.max(0, index + 1),
+        insertAt,
         0,
         section === "fields" ? "+ field: type" : "+ method(type): type",
       );
@@ -1754,34 +1760,34 @@ export default function App() {
         appState: { selectedElementIds },
         captureUpdate: "IMMEDIATELY",
       });
-      setActiveClassRow({ grid, section, index: index + 1 });
+      setActiveClassRows([{ grid, section, index: insertAt }]);
       queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
     },
     [queueSave],
   );
 
-  /** Delete the selected fields/methods row. */
-  const deleteClassRow = useCallback(
-    ({ grid, section, index }) => {
+  /** Delete every selected fields/methods row in one undo step. */
+  const deleteClassRows = useCallback(
+    (rows) => {
       const api = apiRef.current;
-      if (!api) return;
-      const spec = describeClass(api.getSceneElements(), grid);
+      const first = rows?.[0];
+      if (!api || !first) return;
+      const spec = describeClass(api.getSceneElements(), first.grid);
       if (!spec) return;
-      const key = section === "fields" ? "fields" : "methods";
-      const lines = [...(spec[key] || [])];
-      lines.splice(index, 1);
-      const result = updateClass(api.getSceneElements(), grid, { [key]: lines });
+      const selected = rows.filter((row) => row.grid === first.grid);
+      const { fields, methods } = removeClassRows(spec, selected);
+      const result = updateClass(api.getSceneElements(), first.grid, { fields, methods });
       if (!result) return;
       const selectedElementIds = {};
       for (const el of result.elements) {
-        if (el.customData?.grid === grid) selectedElementIds[el.id] = true;
+        if (el.customData?.grid === first.grid) selectedElementIds[el.id] = true;
       }
       api.updateScene({
         elements: result.elements,
         appState: { selectedElementIds },
         captureUpdate: "IMMEDIATELY",
       });
-      setActiveClassRow(null);
+      setActiveClassRows([]);
       queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
     },
     [queueSave],
@@ -1941,7 +1947,7 @@ export default function App() {
         appState: { selectedElementIds },
         captureUpdate: "IMMEDIATELY",
       });
-      setActiveClassRow(null);
+      setActiveClassRows([]);
       queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
     };
     host.addEventListener("pointerdown", onDown, true);
@@ -1982,11 +1988,30 @@ export default function App() {
         }
       }
       if (!grid) {
-        setActiveClassRow(null);
+        setActiveClassRows([]);
         return;
       }
       const row = classRowAt(elements, grid, sceneX, sceneY);
-      setActiveClassRow(row ? { grid: row.grid, section: row.section, index: row.index } : null);
+      if (!row) {
+        setActiveClassRows([]);
+        return;
+      }
+      const target = { grid: row.grid, section: row.section, index: row.index };
+      const shift = event.shiftKey;
+      setActiveClassRows((prev) => {
+        if (!shift) return [target];
+        if (!prev.length || prev[0].grid !== target.grid) return [target];
+        const exists = prev.some(
+          (item) =>
+            item.section === target.section && item.index === target.index,
+        );
+        return exists
+          ? prev.filter(
+              (item) =>
+                !(item.section === target.section && item.index === target.index),
+            )
+          : [...prev, target];
+      });
     };
     host.addEventListener("pointerdown", onDown, true);
     return () => host.removeEventListener("pointerdown", onDown, true);
@@ -2185,14 +2210,14 @@ export default function App() {
           apiRef={apiRef}
           canvasRef={canvasRef}
           onClone={cloneTable}
-          enabled={!activeClassRow}
+          enabled={activeClassRows.length === 0}
         />
         <ErRowControls
           apiRef={apiRef}
           canvasRef={canvasRef}
-          activeRow={activeClassRow}
+          activeRows={activeClassRows}
           onAdd={addClassRow}
-          onDelete={deleteClassRow}
+          onDelete={deleteClassRows}
         />
         <RelationPanel
           apiRef={apiRef}

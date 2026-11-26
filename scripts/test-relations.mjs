@@ -75,13 +75,13 @@ const sourceFrameAfter = frameOf(result.elements, sourceId);
 const cloneFrame = frameOf(result.elements, cloneId);
 const arrow = result.elements.find((el) => el.id === result.arrowId);
 
-check("cloneAndConnect clones the class structure without fields/methods", () => {
+check("cloneAndConnect copies the class fields, methods and title", () => {
   assert.ok(cloneId && cloneId !== sourceId);
   assert.ok(sourceFrameAfter && cloneFrame);
   assert.equal(cloneFrame.customData.class, true);
   assert.equal(cloneFrame.customData.classData.title, "Order");
-  assert.deepEqual(cloneFrame.customData.classData.fields, []);
-  assert.deepEqual(cloneFrame.customData.classData.methods, []);
+  assert.deepEqual(cloneFrame.customData.classData.fields, ["+ id: uuid", "+ total: money"]);
+  assert.deepEqual(cloneFrame.customData.classData.methods, ["+ submit(): void"]);
   assert.equal(result.elements.filter((el) => isGridCell(el, cloneId)).length, 0);
   assert.equal(result.selectedId, cloneFrame.id);
 });

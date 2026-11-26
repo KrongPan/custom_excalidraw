@@ -219,8 +219,8 @@ function cloneClassAndConnect(list, sourceGridId, direction, sourceFrame) {
   const built = buildClass({
     gridId: cloneGridId,
     title: spec.title,
-    fields: [],
-    methods: [],
+    fields: spec.fields,
+    methods: spec.methods,
     width: spec.width,
     collapsed: false,
   });

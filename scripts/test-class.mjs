@@ -14,6 +14,7 @@ import {
   healClass,
   isClassGrid,
   readClassSpec,
+  removeClassRows,
   toggleClass,
   updateClass,
 } from "../app/src/class.js";
@@ -115,6 +116,28 @@ check("classRowAt finds field and method rows for the row controls", () => {
   assert.equal(hitMethod?.section, "methods");
   assert.equal(hitMethod?.index, 0);
   assert.equal(classRowAt(page, gridId, method.left - 20, method.centerY), null);
+});
+
+check("empty fields/methods sections expose a virtual row for +", () => {
+  const empty = buildClass({ title: "Empty", fields: [], methods: [], width: 320 });
+  const emptyFrame = empty.elements.find((el) => isGridFrame(el));
+  const fieldHit = classRowAt(empty.elements, empty.gridId, emptyFrame.x + 20, emptyFrame.y + 66);
+  assert.equal(fieldHit?.section, "fields");
+  assert.equal(fieldHit?.index, 0);
+  const methodHit = classRowAt(empty.elements, empty.gridId, emptyFrame.x + 20, emptyFrame.y + 110);
+  assert.equal(methodHit?.section, "methods");
+  assert.equal(methodHit?.index, 0);
+});
+
+check("removeClassRows deletes several selected rows at once", () => {
+  const spec = describeClass(page, gridId);
+  const next = removeClassRows(spec, [
+    { section: "fields", index: 0 },
+    { section: "fields", index: 2 },
+    { section: "methods", index: 0 },
+  ]);
+  assert.deepEqual(next.fields, ["+ field: two"]);
+  assert.deepEqual(next.methods, []);
 });
 
 check("updateClass can add and remove a row", () => {

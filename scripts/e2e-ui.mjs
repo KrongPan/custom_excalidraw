@@ -1280,10 +1280,10 @@ async function openEditor(boardId = BOARD) {
       };
     })()`);
     check(
-      "ER clone keeps the class name with empty fields/methods",
+      "ER clone keeps the class name, fields and methods",
       relation.cloneTitle === relation.sourceTitle &&
-        relation.cloneFields === 0 &&
-        relation.cloneMethods === 0,
+        relation.cloneFields === 3 &&
+        relation.cloneMethods === 1,
       JSON.stringify(relation),
     );
     check(
