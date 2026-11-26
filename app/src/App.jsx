@@ -401,6 +401,9 @@ export default function App() {
   const toolsRef = useRef(null);
   const toolsNaturalRef = useRef(null);
   const toolsDragRef = useRef(null);
+  /* Once the row is dragged it belongs to the person: automatic centring stops.
+     Until then it stays in the middle of the free space as it grows. */
+  const toolsMovedRef = useRef(false);
   const launcherRef = useRef(null);
   const launcherDragRef = useRef(null);
   const launcherMovedRef = useRef(false);
@@ -494,6 +497,7 @@ export default function App() {
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const viewW = document.documentElement.clientWidth || window.innerWidth;
+    toolsMovedRef.current = false;
     setToolsPos({
       x: Math.max(TOOLS_MARGIN, Math.round((viewW - rect.width) / 2)),
       y: Math.max(TOOLS_MARGIN, toolsNaturalRef.current?.y ?? 65),
@@ -600,10 +604,13 @@ export default function App() {
       const rect = el.getBoundingClientRect();
       if (!rect.width) return;
       const limit = corner.getBoundingClientRect().left - TOOLS_MARGIN;
-      if (rect.right <= limit) return;
+      // a row nobody has dragged stays centred as it changes size; one that was
+      // dragged is left alone unless it would slide under the save pill
+      if (toolsMovedRef.current && rect.right <= limit) return;
       const viewW = document.documentElement.clientWidth || window.innerWidth;
       const centred = Math.round((viewW - rect.width) / 2);
       const next = clampPoint(Math.min(centred, limit - rect.width), rect.top);
+      if (Math.abs(rect.left - next.x) < 1) return;
       el.style.left = `${next.x}px`;
       setToolsPos(next);
     };
@@ -623,8 +630,12 @@ export default function App() {
       const dy = event.clientY - drag.startY;
       setToolsPos(clampPoint(drag.originX + dx, drag.originY + dy));
     };
-    const onUp = () => {
-      if (!toolsDragRef.current) return;
+    const onUp = (event) => {
+      const drag = toolsDragRef.current;
+      if (!drag) return;
+      if (Math.abs((event?.clientX ?? drag.startX) - drag.startX) > 2 || Math.abs((event?.clientY ?? drag.startY) - drag.startY) > 2) {
+        toolsMovedRef.current = true;
+      }
       toolsDragRef.current = null;
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
