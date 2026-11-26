@@ -519,7 +519,8 @@ body {
 }
 
 /* The drawing-tool island is moved out of Excalidraw's top grid and becomes a
-   floating panel with its own grip and fold button. */
+   fixed row that sits centred above the canvas: it is not draggable and has no
+   fold button, so its place is decided for it. */
 .canvas .excalidraw .App-toolbar.tools-floating {
   position: fixed;
   right: auto;
@@ -528,65 +529,11 @@ body {
   margin: 0;
   width: max-content;
   max-width: calc(100vw - 16px);
-  touch-action: none;
   user-select: none;
 }
 .canvas .excalidraw .App-toolbar.tools-floating .HintViewer {
   pointer-events: none;
 }
-.tools-grip,
-.tools-fold {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 20px;
-  height: 27px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  touch-action: none;
-}
-/* the grip is the whole affordance for moving the island, so say so with the
-   cursor and give it a little more width than the dots it draws */
-.tools-grip {
-  margin-right: 1px;
-}
-/* Excalidraw paints its own `cursor: pointer` on the row's children, so the
-   grab cursor has to out-specify it, not merely be inherited. */
-.canvas .excalidraw .App-toolbar.tools-floating .tools-grip {
-  cursor: grab;
-}
-.canvas .excalidraw .App-toolbar.tools-floating .tools-grip:active {
-  cursor: grabbing;
-}
-.tools-fold {
-  margin-left: 1px;
-  cursor: pointer;
-}
-.tools-grip:hover,
-.tools-fold:hover {
-  background: var(--frost-hover);
-  color: var(--ink);
-}
-.tools-grip:focus-visible,
-.tools-fold:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.tools-grip svg {
-  opacity: 0.58;
-}
-.tools-fold {
-  margin-left: 1px;
-  cursor: pointer;
-}
-.tools-fold svg {
-  opacity: 0.62;
-}
-
 /* The slot holds the overflow button in the native row. */
 .tools-table-slot {
   display: inline-flex;
@@ -706,41 +653,6 @@ body {
 .tools-more-row.active .tools-more-icon {
   color: var(--accent);
 }
-.shell.tools-collapsed .canvas .excalidraw .App-toolbar.tools-floating {
-  display: none;
-}
-.tools-launcher {
-  position: fixed;
-  z-index: 52;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 11px 0 9px;
-  border: 1px solid var(--glass-line);
-  border-radius: 11px;
-  background: var(--frost);
-  box-shadow: 0 10px 28px rgba(31, 36, 71, 0.14);
-  color: var(--ink);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
-}
-.tools-launcher:hover {
-  background: var(--frost-hover);
-}
-.tools-launcher:active {
-  cursor: grabbing;
-}
-.tools-launcher:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 /* separate navigation button, pinned to the top-left of the page */
 .back-fab {
   position: fixed;

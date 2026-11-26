@@ -501,141 +501,74 @@ async function openEditor(boardId = BOARD) {
 
     const toolsBefore = await cdp.evaluate(`(() => {
       const tools = document.querySelector(".App-toolbar");
-      const grip = tools?.querySelector(".tools-grip");
-      const fold = tools?.querySelector(".tools-fold");
       const r = tools?.getBoundingClientRect();
       return {
         exists: !!tools,
         floating: tools?.classList.contains("tools-floating") || false,
         position: tools ? getComputedStyle(tools).position : null,
-        grip: !!grip,
-        fold: !!fold,
+        grip: !!tools?.querySelector(".tools-grip"),
+        fold: !!tools?.querySelector(".tools-fold"),
+        launcher: !!document.querySelector(".tools-launcher"),
         left: r?.left ?? null,
         top: r?.top ?? null,
-        bottom: r?.bottom ?? null,
         width: r?.width ?? 0,
         mid: r ? Math.round(r.top + r.height / 2) : null,
         backMid: (() => { const b = document.querySelector(".back-fab").getBoundingClientRect(); return Math.round(b.top + b.height / 2); })(),
         presenceLeft: Math.round(document.querySelector(".presence").getBoundingClientRect().left),
+        centred: r ? Math.round((r.left + r.width / 2) * 2) / 2 - innerWidth / 2 : null,
       };
     })()`);
     check(
       "drawing tools are a separate floating island on the same line",
       toolsBefore.exists && toolsBefore.floating && toolsBefore.position === "fixed" &&
-        toolsBefore.grip && toolsBefore.fold &&
         Math.abs(toolsBefore.mid - toolsBefore.backMid) <= 2 &&
         toolsBefore.left + toolsBefore.width <= toolsBefore.presenceLeft,
       JSON.stringify(toolsBefore),
     );
-
-    await cdp.drag(".tools-grip", 70, 40);
-    await sleep(200);
-    const toolsAfter = await cdp.evaluate(`(() => {
-      const r = document.querySelector(".App-toolbar").getBoundingClientRect();
-      const saved = JSON.parse(localStorage.getItem("boards-tools") || "null");
-      return { left: r.left, top: r.top, vw: innerWidth, vh: innerHeight, w: r.width, h: r.height, saved };
-    })()`);
     check(
-      "drawing tools can be dragged and remember their spot",
-      toolsAfter.left > toolsBefore.left + 30 && toolsAfter.top > toolsBefore.top + 20 &&
-        toolsAfter.left + toolsAfter.w <= toolsAfter.vw && toolsAfter.top + toolsAfter.h <= toolsAfter.vh &&
-        !!toolsAfter.saved,
-      JSON.stringify({ toolsBefore, toolsAfter }),
+      "the tool row has no move grip, no fold button and no folded pill",
+      !toolsBefore.grip && !toolsBefore.fold && !toolsBefore.launcher,
+      JSON.stringify({ grip: toolsBefore.grip, fold: toolsBefore.fold, launcher: toolsBefore.launcher }),
     );
-
-    const gripCursor = await cdp.evaluate(
-      `getComputedStyle(document.querySelector(".tools-grip")).cursor`,
-    );
-    check("the grip advertises that it moves the toolbar", gripCursor === "grab", gripCursor);
-
-    const blankSpot = await cdp.evaluate(`(() => {
-      const tools = document.querySelector(".App-toolbar.tools-floating");
-      const r = tools.getBoundingClientRect();
-      for (let dx = Math.round(r.width) - 1; dx > 0; dx -= 1) {
-        const hit = document.elementFromPoint(r.left + dx, r.top + r.height / 2);
-        if (hit === tools) return { x: r.left + dx, y: r.top + r.height / 2, left: r.left, top: r.top };
-      }
-      return null;
-    })()`);
-    let surfaceMoved = false;
-    if (blankSpot) {
-      await cdp.dragPoint(blankSpot.x, blankSpot.y, -60, 45);
-      await sleep(200);
-      surfaceMoved = await cdp.evaluate(`(() => {
-        const r = document.querySelector(".App-toolbar.tools-floating").getBoundingClientRect();
-        return Math.abs(r.left - (${blankSpot.left} - 60)) <= 2 && Math.abs(r.top - (${blankSpot.top} + 45)) <= 2;
-      })()`);
-    }
     check(
-      "the island can be dragged from its empty surface, not only the grip",
-      Boolean(blankSpot) && surfaceMoved,
-      JSON.stringify({ blankSpot, surfaceMoved }),
+      "the tool row sits centred above the canvas",
+      toolsBefore.centred !== null && Math.abs(toolsBefore.centred) <= 2,
+      JSON.stringify({ left: toolsBefore.left, width: toolsBefore.width, centred: toolsBefore.centred }),
     );
 
-    await cdp.click(".tools-fold");
-    await cdp.waitFor(`document.querySelector(".shell").classList.contains("tools-collapsed")`, {
-      label: "tools fold",
-    });
-    const toolsFolded = await cdp.evaluate(`(() => {
+    // The row used to follow the pointer from its grip or any blank part of the
+    // island. Neither exists now: a drag on the row itself must leave it alone
+    // and must not write a remembered spot.
+    const dragProof = await cdp.evaluate(`(async () => {
       const tools = document.querySelector(".App-toolbar");
-      const launcher = document.querySelector(".tools-launcher");
-      return {
-        display: getComputedStyle(tools).display,
-        launcher: !!launcher,
-        launcherLabel: launcher?.getAttribute("aria-label") || null,
-      };
-    })()`);
+      const r = tools.getBoundingClientRect();
+      const before = { left: Math.round(r.left), top: Math.round(r.top) };
+      localStorage.removeItem("boards-tools");
+      const start = { clientX: r.left + 6, clientY: r.top + r.height / 2, pointerId: 1, button: 0, bubbles: true, cancelable: true };
+      tools.dispatchEvent(new PointerEvent("pointerdown", { ...start, buttons: 1 }));
+      window.dispatchEvent(new PointerEvent("pointermove", { ...start, buttons: 1, clientX: start.clientX + 90, clientY: start.clientY + 60 }));
+      window.dispatchEvent(new PointerEvent("pointerup", { ...start, buttons: 0, clientX: start.clientX + 90, clientY: start.clientY + 60 }));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const after = tools.getBoundingClientRect();
+      return { before, after: { left: Math.round(after.left), top: Math.round(after.top) }, stored: localStorage.getItem("boards-tools"), cursor: getComputedStyle(tools).cursor };
+    })()`, { awaitPromise: true });
     check(
-      "drawing tools fold into a launcher",
-      toolsFolded.display === "none" && toolsFolded.launcher &&
-        toolsFolded.launcherLabel === "แสดงเครื่องมือวาด",
-      JSON.stringify(toolsFolded),
-    );
-    const pillBefore = await cdp.evaluate(`(() => {
-      const pill = document.querySelector(".tools-launcher");
-      const r = pill.getBoundingClientRect();
-      return { left: r.left, top: r.top, cursor: getComputedStyle(pill).cursor };
-    })()`);
-    await cdp.drag(".tools-launcher", -120, 160);
-    await sleep(250);
-    const pillAfter = await cdp.evaluate(`(() => {
-      const pill = document.querySelector(".tools-launcher");
-      const r = pill.getBoundingClientRect();
-      return {
-        left: r.left,
-        top: r.top,
-        stillFolded: document.querySelector(".shell").classList.contains("tools-collapsed"),
-        saved: JSON.parse(localStorage.getItem("boards-tools") || "null"),
-      };
-    })()`);
-    check(
-      "the folded pill can be dragged around and stays folded",
-      pillBefore.cursor === "grab" && pillAfter.stillFolded &&
-        Math.abs(pillAfter.left - (pillBefore.left - 120)) <= 2 &&
-        Math.abs(pillAfter.top - (pillBefore.top + 160)) <= 2 &&
-        !!pillAfter.saved,
-      JSON.stringify({ pillBefore, pillAfter }),
+      "the tool row cannot be dragged and remembers no spot",
+      dragProof.before.left === dragProof.after.left && dragProof.before.top === dragProof.after.top &&
+        dragProof.stored === null && dragProof.cursor !== "grab",
+      JSON.stringify(dragProof),
     );
 
-    await cdp.click(".tools-launcher");
-    await cdp.waitFor(`!document.querySelector(".shell").classList.contains("tools-collapsed")`, {
-      label: "tools unfold",
-    });
-    const unfoldedAt = await cdp.evaluate(`(() => {
-      const r = document.querySelector(".App-toolbar.tools-floating").getBoundingClientRect();
-      return { left: r.left, top: r.top };
-    })()`);
+    const rowStays = await cdp.evaluate(`(() => ({
+      collapsedClass: document.querySelector(".shell").classList.contains("tools-collapsed"),
+      display: getComputedStyle(document.querySelector(".App-toolbar")).display,
+      foldedButton: !!document.querySelector(".tools-fold, .tools-launcher"),
+    }))()`);
     check(
-      "unfolding puts the row where the pill was",
-      Math.abs(unfoldedAt.left - pillAfter.left) <= 2 && Math.abs(unfoldedAt.top - pillAfter.top) <= 2,
-      JSON.stringify({ pillAfter, unfoldedAt }),
+      "the drawing tools cannot be folded away",
+      !rowStays.collapsedClass && rowStays.display !== "none" && !rowStays.foldedButton,
+      JSON.stringify(rowStays),
     );
-    check(
-      "the launcher brings the drawing tools back",
-      (await cdp.evaluate(`getComputedStyle(document.querySelector(".App-toolbar")).display`)) !== "none",
-    );
-    await cdp.evaluate(`document.querySelector(".tools-grip").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
-    await sleep(250);
 
     const tablePlacement = await cdp.evaluate(`(() => {
       const table = document.querySelector(".tools-more");

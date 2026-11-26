@@ -48,12 +48,6 @@ const IconBack = () => (
     <path d="M15 5l-7 7 7 7" />
   </svg>
 );
-const IconTools = () => (
-  <svg {...icon} width={15} height={15}>
-    <path d="M4 20v-5M12 20V9M20 20v-8" />
-    <path d="M2 12h4M10 6h4M18 17h4" />
-  </svg>
-);
 /* The table button lives in the drawing tools row, so it borrows their metrics. */
 const IconTable = () => (
   <svg {...icon} width={17} height={17} strokeWidth={1.6}>
@@ -250,9 +244,8 @@ function tabSid() {
   }
 }
 
-/* The drawing tools float above the canvas: drag the little grip to move them
-   anywhere, and fold them away when the canvas needs the room. */
-const TOOLS_KEY = "boards-tools";
+/* The drawing tools float above the canvas in a fixed row: no grip to move them
+   and no fold button — they always sit centred, and only the extra tools change. */
 const MINIMAP_KEY = "boards-minimap";
 const MINIMAP_FOLD_KEY = "boards-minimap-fold";
 const THEME_KEY = "boards-theme";
@@ -261,19 +254,6 @@ const TOOLS_MARGIN = 8;
 /* Below this width Excalidraw swaps in its own mobile row and our extra controls
    step aside; the same breakpoint as the stylesheet. */
 const isPhone = () => window.matchMedia("(max-width: 560px)").matches;
-
-function readToolsPrefs() {
-  try {
-    const saved = JSON.parse(window.localStorage.getItem(TOOLS_KEY) || "null");
-    return {
-      x: Number.isFinite(saved?.x) ? saved.x : null,
-      y: Number.isFinite(saved?.y) ? saved.y : null,
-      collapsed: saved?.collapsed === true,
-    };
-  } catch {
-    return { x: null, y: null, collapsed: false };
-  }
-}
 
 export default function App() {
   const boardId = useRef(readBoardId()).current;
@@ -301,14 +281,6 @@ export default function App() {
   // the board's saved theme wins, but a board that never stored one opens in
   // whatever this browser used last
   const themePrefRef = useRef(theme);
-  const toolsPrefsRef = useRef(null);
-  if (!toolsPrefsRef.current) toolsPrefsRef.current = readToolsPrefs();
-  const [toolsPos, setToolsPos] = useState(() => {
-    const saved = toolsPrefsRef.current;
-    return saved.x === null || saved.y === null ? null : { x: saved.x, y: saved.y };
-  });
-  const [toolsCollapsed, setToolsCollapsed] = useState(toolsPrefsRef.current.collapsed);
-  const [toolsReady, setToolsReady] = useState(false);
   const [toolsEpoch, setToolsEpoch] = useState(0);
   // DOM slot inside the drawing tools row; the table button is portalled into it.
   const [tableSlot, setTableSlot] = useState(null);
@@ -399,16 +371,6 @@ export default function App() {
     }
   }, []);
   const toolsRef = useRef(null);
-  const toolsNaturalRef = useRef(null);
-  const toolsDragRef = useRef(null);
-  /* Once the row is dragged it belongs to the person: automatic centring stops.
-     Until then it stays in the middle of the free space as it grows. */
-  const toolsMovedRef = useRef(false);
-  const launcherRef = useRef(null);
-  const launcherDragRef = useRef(null);
-  const launcherMovedRef = useRef(false);
-  const toolsCollapsedRef = useRef(toolsCollapsed);
-  toolsCollapsedRef.current = toolsCollapsed;
 
   /* ---------------------------------------------------------------- boot */
 
@@ -473,48 +435,17 @@ export default function App() {
 
   /* ------------------------------------------------------ floating draw tools */
 
-  const clampTools = useCallback(() => {
-    const el = toolsRef.current;
-    if (!el || toolsCollapsedRef.current) return;
-    const rect = el.getBoundingClientRect();
-    if (!rect.width && !rect.height) return;
-    const viewW = document.documentElement.clientWidth || window.innerWidth;
-    const viewH = document.documentElement.clientHeight || window.innerHeight;
-    setToolsPos((pos) => {
-      if (!pos) return pos;
-      const maxX = Math.max(TOOLS_MARGIN, viewW - rect.width - TOOLS_MARGIN);
-      const maxY = Math.max(TOOLS_MARGIN, viewH - rect.height - TOOLS_MARGIN);
-      const x = Math.min(Math.max(TOOLS_MARGIN, pos.x), maxX);
-      const y = Math.min(Math.max(TOOLS_MARGIN, pos.y), maxY);
-      return x === pos.x && y === pos.y ? pos : { x, y };
-    });
-  }, []);
-
-  const resetToolsPosition = useCallback(() => {
-    // When the row is folded away the toolbar is display:none and measures 0,
-    // so the pill is the element that has to go back to the middle.
-    const el = toolsCollapsedRef.current ? launcherRef.current : toolsRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const viewW = document.documentElement.clientWidth || window.innerWidth;
-    toolsMovedRef.current = false;
-    setToolsPos({
-      x: Math.max(TOOLS_MARGIN, Math.round((viewW - rect.width) / 2)),
-      y: Math.max(TOOLS_MARGIN, toolsNaturalRef.current?.y ?? 65),
-    });
-  }, []);
-
-  // Excalidraw owns the drawing-tool island. Give its row a grip and a fold
-  // button, then treat the island as our own floating panel (fixed coordinates
-  // so it can travel over the canvas and stay put when the canvas scrolls).
+  // Excalidraw owns the drawing-tool island. Detach its row from the menu grid
+  // and hold it as a fixed row centred above the canvas: it cannot be moved and
+  // it has no fold button, so the only thing that changes its place is its own
+  // width (and the save pill that shares the top band on the right).
   /* Phones keep Excalidraw's own mobile tool row: it is already sized for the
      small island, and floating it would push the row past the screen edge. */
 
   // Excalidraw mounts its toolbar a frame or two after the board becomes ready,
   // and re-renders it as a fresh node now and then. Poll for a while instead of
-  // looking once: bump the epoch whenever the row is there but our grip is not,
-  // so both the first mount and a later replacement get the grip, the table slot
-  // and the fold control.
+  // looking once: bump the epoch whenever the row is there but our table slot is
+  // not, so both the first mount and a later replacement get the slot.
   useEffect(() => {
     if (phase !== "ready") return undefined;
     let cancelled = false;
@@ -525,7 +456,7 @@ export default function App() {
       if (!isPhone()) {
         const row = canvasRef.current?.querySelector(".App-toolbar");
         const stack = row?.querySelector(".Stack.Stack_horizontal");
-        if (stack && !row.querySelector(".tools-grip")) setToolsEpoch((value) => value + 1);
+        if (stack && !row.querySelector(".tools-table-slot")) setToolsEpoch((value) => value + 1);
       }
       if (performance.now() - startedAt < 20000) timer = window.setTimeout(look, 200);
     };
@@ -543,151 +474,47 @@ export default function App() {
     const stack = el.querySelector(":scope > .Stack.Stack_horizontal") || el.querySelector(".Stack.Stack_horizontal");
     if (!stack) return undefined;
     toolsRef.current = el;
+    // measured before the class lands, so this is the top band Excalidraw gave it
     const natural = el.getBoundingClientRect();
-    toolsNaturalRef.current = { x: natural.left, y: natural.top };
-    const saved = toolsPrefsRef.current;
-    const start = {
-      x: Number.isFinite(saved.x) ? saved.x : natural.left,
-      y: Number.isFinite(saved.y) ? saved.y : natural.top,
-    };
-    el.style.left = `${start.x}px`;
-    el.style.top = `${start.y}px`;
+    el.style.top = `${Math.max(TOOLS_MARGIN, natural.top)}px`;
     el.classList.add("tools-floating");
-    setToolsPos((pos) => pos || start);
-    setToolsReady(true);
-
-    const grip = document.createElement("button");
-    grip.type = "button";
-    grip.className = "tools-grip";
-    grip.title = "ลากเพื่อย้ายเครื่องมือวาด · ดับเบิลคลิกเพื่อวางกลับตรงกลาง";
-    grip.setAttribute("aria-label", "ลากเครื่องมือวาด");
-    grip.innerHTML =
-      '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
-
-    const fold = document.createElement("button");
-    fold.type = "button";
-    fold.className = "tools-fold";
-    fold.title = "ย่อเครื่องมือวาด";
-    fold.setAttribute("aria-label", "ย่อเครื่องมือวาด");
-    fold.innerHTML =
-      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg>';
 
     // The table button is a React portal, not DOM surgery: this span only marks
-    // where in the row it belongs (just before the fold control).
+    // where in the row it belongs (at the end of the drawing tools).
     const slot = document.createElement("span");
     slot.className = "tools-table-slot";
 
-    stack.prepend(grip);
     stack.append(slot);
-    stack.append(fold);
     setTableSlot(slot);
-
-    const clampPoint = (x, y) => {
-      const rect = el.getBoundingClientRect();
-      const viewW = document.documentElement.clientWidth || window.innerWidth;
-      const viewH = document.documentElement.clientHeight || window.innerHeight;
-      return {
-        x: Math.min(Math.max(TOOLS_MARGIN, x), Math.max(TOOLS_MARGIN, viewW - rect.width - TOOLS_MARGIN)),
-        y: Math.min(Math.max(TOOLS_MARGIN, y), Math.max(TOOLS_MARGIN, viewH - rect.height - TOOLS_MARGIN)),
-      };
-    };
 
     // The save pill and the avatars share this band on the right. The row starts
     // narrow (the portalled buttons arrive a beat later) and grows as they land,
-    // so a row measured early slides under them: watch the row's own size, and
-    // when it no longer fits, put it back in the middle of the free space unless
-    // someone is dragging it.
+    // so a row measured early slides under them: watch the row's own size and
+    // re-centre it in whatever free space is left.
     const keepClear = () => {
-      if (toolsDragRef.current) return;
       const corner = document.querySelector(".top-actions");
       if (!corner) return;
       const rect = el.getBoundingClientRect();
       if (!rect.width) return;
-      const limit = corner.getBoundingClientRect().left - TOOLS_MARGIN;
-      // a row nobody has dragged stays centred as it changes size; one that was
-      // dragged is left alone unless it would slide under the save pill
-      if (toolsMovedRef.current && rect.right <= limit) return;
       const viewW = document.documentElement.clientWidth || window.innerWidth;
+      const limit = Math.max(rect.width + TOOLS_MARGIN, corner.getBoundingClientRect().left - TOOLS_MARGIN);
       const centred = Math.round((viewW - rect.width) / 2);
-      const next = clampPoint(Math.min(centred, limit - rect.width), rect.top);
-      if (Math.abs(rect.left - next.x) < 1) return;
-      el.style.left = `${next.x}px`;
-      setToolsPos(next);
+      const next = Math.max(TOOLS_MARGIN, Math.min(centred, limit - rect.width));
+      if (Math.abs(rect.left - next) < 1) return;
+      el.style.left = `${next}px`;
     };
+    keepClear();
     const rowObserver = new ResizeObserver(keepClear);
     rowObserver.observe(el);
     const clearTimer = window.setTimeout(keepClear, 120);
     window.addEventListener("resize", keepClear);
 
-    // Pointer capture is a nicety, not the mechanism: Safari can refuse it on a
-    // strip inside a transformed stacking context, and any drag that left the
-    // 17px grip would die mid-way. Window listeners keep it alive everywhere.
-    const onMove = (event) => {
-      const drag = toolsDragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      event.preventDefault();
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
-      setToolsPos(clampPoint(drag.originX + dx, drag.originY + dy));
+    // React re-renders the tool row on theme/tool changes; keep the table slot at
+    // the end of the row.
+    const keepSlot = () => {
+      if (!stack.contains(slot)) stack.append(slot);
     };
-    const onUp = (event) => {
-      const drag = toolsDragRef.current;
-      if (!drag) return;
-      if (Math.abs((event?.clientX ?? drag.startX) - drag.startX) > 2 || Math.abs((event?.clientY ?? drag.startY) - drag.startY) > 2) {
-        toolsMovedRef.current = true;
-      }
-      toolsDragRef.current = null;
-      window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerup", onUp, true);
-      window.removeEventListener("pointercancel", onUp, true);
-    };
-    const beginDrag = (event) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const rect = el.getBoundingClientRect();
-      toolsDragRef.current = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        originX: rect.left,
-        originY: rect.top,
-      };
-      window.addEventListener("pointermove", onMove, true);
-      window.addEventListener("pointerup", onUp, true);
-      window.addEventListener("pointercancel", onUp, true);
-      try {
-        grip.setPointerCapture(event.pointerId);
-      } catch {
-        /* the window listeners are what actually move it */
-      }
-    };
-    const onDown = (event) => beginDrag(event);
-    // Any blank part of the island drags it too, so nobody has to find the grip;
-    // the tools themselves keep their own clicks.
-    const onSurfaceDown = (event) => {
-      if (event.target.closest?.("button, label, input, select, textarea, a[href], .ToolIcon")) return;
-      beginDrag(event);
-    };
-    const onFold = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setToolsCollapsed(true);
-      setToolsMenuOpen(false);
-    };
-    grip.addEventListener("pointerdown", onDown);
-    grip.addEventListener("dblclick", resetToolsPosition);
-    el.addEventListener("pointerdown", onSurfaceDown);
-    fold.addEventListener("click", onFold);
-
-    // React re-renders the tool row on theme/tool changes; keep our controls,
-    // grip first and fold last, with the table slot in front of the fold.
-    const keepControls = () => {
-      if (stack.firstElementChild !== grip) stack.prepend(grip);
-      if (!stack.contains(slot)) stack.insertBefore(slot, fold.isConnected ? fold : null);
-      if (stack.lastElementChild !== fold) stack.append(fold);
-    };
-    const observer = new MutationObserver(keepControls);
+    const observer = new MutationObserver(keepSlot);
     observer.observe(stack, { childList: true });
 
     return () => {
@@ -695,23 +522,14 @@ export default function App() {
       rowObserver.disconnect();
       window.clearTimeout(clearTimer);
       window.removeEventListener("resize", keepClear);
-      grip.removeEventListener("pointerdown", onDown);
-      grip.removeEventListener("dblclick", resetToolsPosition);
-      el.removeEventListener("pointerdown", onSurfaceDown);
-      onUp();
-      fold.removeEventListener("click", onFold);
-      grip.remove();
       slot.remove();
-      fold.remove();
       setTableSlot(null);
       el.classList.remove("tools-floating");
       el.style.left = "";
       el.style.top = "";
-      toolsDragRef.current = null;
-      setToolsReady(false);
       if (toolsRef.current === el) toolsRef.current = null;
     };
-  }, [phase, resetToolsPosition, toolsEpoch]);
+  }, [phase, toolsEpoch]);
 
   /* Crossing the phone line swaps in Excalidraw's mobile row, so the float effect
      has to run again (float on desktop, clean up on phones). */
@@ -787,97 +605,6 @@ export default function App() {
       setPresenceHost(null);
     };
   }, [phase, toolsEpoch]);
-
-  useEffect(() => {
-    const el = toolsRef.current;
-    if (!el || !toolsPos) return;
-    el.style.left = `${toolsPos.x}px`;
-    el.style.top = `${toolsPos.y}px`;
-  }, [toolsPos]);
-
-  useEffect(() => {
-    if (phase !== "ready" || !toolsReady || toolsCollapsed) return;
-    clampTools();
-  }, [phase, toolsReady, toolsCollapsed, toolsPos, clampTools]);
-
-  // The folded pill is the toolbar's only visible part, so it has to travel the
-  // same way: drag to move, plain click still opens the row, double-click resets.
-  useEffect(() => {
-    const pill = launcherRef.current;
-    if (!pill || !toolsCollapsed) return undefined;
-
-    const clampPill = (x, y) => {
-      const rect = pill.getBoundingClientRect();
-      const viewW = document.documentElement.clientWidth || window.innerWidth;
-      const viewH = document.documentElement.clientHeight || window.innerHeight;
-      return {
-        x: Math.min(Math.max(TOOLS_MARGIN, x), Math.max(TOOLS_MARGIN, viewW - rect.width - TOOLS_MARGIN)),
-        y: Math.min(Math.max(TOOLS_MARGIN, y), Math.max(TOOLS_MARGIN, viewH - rect.height - TOOLS_MARGIN)),
-      };
-    };
-
-    const onMove = (event) => {
-      const drag = launcherDragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      event.preventDefault();
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) launcherMovedRef.current = true;
-      setToolsPos(clampPill(drag.originX + dx, drag.originY + dy));
-    };
-    const onUp = () => {
-      if (!launcherDragRef.current) return;
-      launcherDragRef.current = null;
-      window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerup", onUp, true);
-      window.removeEventListener("pointercancel", onUp, true);
-    };
-    const onDown = (event) => {
-      if (event.button !== 0) return;
-      const rect = pill.getBoundingClientRect();
-      launcherDragRef.current = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        originX: rect.left,
-        originY: rect.top,
-      };
-      launcherMovedRef.current = false;
-      window.addEventListener("pointermove", onMove, true);
-      window.addEventListener("pointerup", onUp, true);
-      window.addEventListener("pointercancel", onUp, true);
-    };
-    pill.addEventListener("pointerdown", onDown);
-    return () => {
-      pill.removeEventListener("pointerdown", onDown);
-      onUp();
-    };
-    // Deliberately not keyed on toolsPos: the drag itself moves the pill, and
-    // re-running this effect on every move would tear the listeners down after
-    // the first pixel. No double-click reset either — a single click opens the
-    // row, so the pill cannot also wait for a second one.
-  }, [toolsCollapsed, resetToolsPosition]);
-
-  useEffect(() => {
-    const onResize = () => clampTools();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [clampTools]);
-
-  useEffect(() => {
-    if (!toolsPos) return undefined;
-    const timer = window.setTimeout(() => {
-      try {
-        window.localStorage.setItem(
-          TOOLS_KEY,
-          JSON.stringify({ ...toolsPos, collapsed: toolsCollapsed }),
-        );
-      } catch {
-        /* private mode: remembering the spot is optional */
-      }
-    }, 200);
-    return () => window.clearTimeout(timer);
-  }, [toolsPos, toolsCollapsed]);
 
   /* ---------------------------------------------------------------- saving */
 
@@ -2072,7 +1799,7 @@ export default function App() {
   ];
 
   return (
-    <div className={`shell${panelOpen ? " panel-open" : ""}${toolsReady && toolsCollapsed ? " tools-collapsed" : ""}`}>
+    <div className={`shell${panelOpen ? " panel-open" : ""}`}>
       {presenceHost ? (
         createPortal(
           <span className="top-actions docked">
@@ -2144,29 +1871,6 @@ export default function App() {
               onToggle={() => setMinimapFolded((folded) => !folded)}
             />
       </div>
-
-      {toolsReady && toolsCollapsed && toolsPos && (
-        <button
-          type="button"
-          className="tools-launcher"
-          ref={launcherRef}
-          style={{ left: toolsPos.x, top: toolsPos.y }}
-          onClick={(event) => {
-            // A drag ends with a click event; that click must not open the row.
-            if (launcherMovedRef.current) {
-              launcherMovedRef.current = false;
-              event.preventDefault();
-              return;
-            }
-            setToolsCollapsed(false);
-          }}
-          aria-label="แสดงเครื่องมือวาด"
-          title="ลากเพื่อย้าย · คลิกเพื่อกางเครื่องมือวาด"
-        >
-          <IconTools />
-          <span>เครื่องมือ</span>
-        </button>
-      )}
 
       <TableBuilder
         open={panelOpen}

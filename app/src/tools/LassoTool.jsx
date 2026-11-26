@@ -128,7 +128,7 @@ export default function LassoTool({
     };
     const onClick = (event) => {
       if (event.target.closest?.(".tools-lasso")) return;
-      if (event.target.closest?.(".App-toolbar, .tools-launcher")) reset();
+      if (event.target.closest?.(".App-toolbar")) reset();
     };
     window.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("click", onClick);
