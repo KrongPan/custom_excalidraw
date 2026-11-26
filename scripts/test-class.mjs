@@ -8,10 +8,13 @@
 import assert from "node:assert/strict";
 import {
   buildClass,
+  classRowAt,
+  classRowBounds,
   describeClass,
   healClass,
   isClassGrid,
   readClassSpec,
+  removeClassRows,
   toggleClass,
   updateClass,
 } from "../app/src/class.js";
@@ -97,6 +100,64 @@ check("collapse hides sections but keeps their data, expand restores them", () =
   assert.equal(expanded.elements.filter((el) => el.customData?.classLine === "fields").length, 3);
 });
 
+check("classRowAt finds field and method rows for the row controls", () => {
+  const field = classRowBounds(page, gridId, "fields", 1);
+  assert.ok(field);
+  assert.equal(field.section, "fields");
+  assert.equal(field.index, 1);
+  assert.ok(field.width > 0 && field.height > 0);
+  const hitField = classRowAt(page, gridId, field.left + 20, field.centerY);
+  assert.equal(hitField?.section, "fields");
+  assert.equal(hitField?.index, 1);
+
+  const method = classRowBounds(page, gridId, "methods", 0);
+  assert.ok(method);
+  const hitMethod = classRowAt(page, gridId, method.left + 20, method.centerY);
+  assert.equal(hitMethod?.section, "methods");
+  assert.equal(hitMethod?.index, 0);
+  assert.equal(classRowAt(page, gridId, method.left - 20, method.centerY), null);
+});
+
+check("empty fields/methods sections expose a virtual row for +", () => {
+  const empty = buildClass({ title: "Empty", fields: [], methods: [], width: 320 });
+  const emptyFrame = empty.elements.find((el) => isGridFrame(el));
+  const fieldHit = classRowAt(empty.elements, empty.gridId, emptyFrame.x + 20, emptyFrame.y + 66);
+  assert.equal(fieldHit?.section, "fields");
+  assert.equal(fieldHit?.index, 0);
+  const methodHit = classRowAt(empty.elements, empty.gridId, emptyFrame.x + 20, emptyFrame.y + 110);
+  assert.equal(methodHit?.section, "methods");
+  assert.equal(methodHit?.index, 0);
+});
+
+check("removeClassRows deletes several selected rows at once", () => {
+  const spec = describeClass(page, gridId);
+  const next = removeClassRows(spec, [
+    { section: "fields", index: 0 },
+    { section: "fields", index: 2 },
+    { section: "methods", index: 0 },
+  ]);
+  assert.deepEqual(next.fields, ["+ field: two"]);
+  assert.deepEqual(next.methods, []);
+});
+
+check("updateClass can add and remove a row", () => {
+  const added = updateClass(page, gridId, {
+    fields: ["+ field: type", "+ new: row", "+ field: two", "+ field: three"],
+  });
+  assert.ok(added, "updateClass failed to add a row");
+  const addedSpec = describeClass(added.elements, gridId);
+  assert.deepEqual(addedSpec.fields, ["+ field: type", "+ new: row", "+ field: two", "+ field: three"]);
+  const removed = updateClass(added.elements, gridId, {
+    fields: ["+ field: type", "+ field: two", "+ field: three"],
+  });
+  assert.ok(removed, "updateClass failed to remove a row");
+  assert.deepEqual(describeClass(removed.elements, gridId).fields, [
+    "+ field: type",
+    "+ field: two",
+    "+ field: three",
+  ]);
+});
+
 check("updateClass keeps the node position and replaces its content", () => {
   const shifted = page.map((el) => ({ ...el, x: el.x + 100, y: el.y + 50 }));
   const next = updateClass(shifted, gridId, {
@@ -132,6 +193,29 @@ check("healClass reflows an edited line and is idempotent", () => {
   const frameAfter = healed.find((el) => isGridFrame(el, gridId));
   assert.equal(frameAfter.customData.classData.fields[0], "a much longer field that must fit");
   assert.equal(healClass(healed, gridId), null, "healClass is not idempotent");
+});
+
+check("healClass keeps sections inside a moved frame", () => {
+  // simulate the frame being dragged separately from its grouped content
+  const moved = page.map((el) =>
+    el.id === frame.id ? { ...el, x: el.x + 200, y: el.y + 100 } : el,
+  );
+  const healed = healClass(moved, gridId);
+  assert.ok(healed, "healClass returned null after a frame-only move");
+  const mFrame = healed.find((el) => isGridFrame(el, gridId));
+  const title = healed.find((el) => el.customData?.classTitle);
+  const sepHead = healed.find((el) => el.id === `${gridId}-sep-head`);
+  const field = healed.find(
+    (el) => el.customData?.classLine === "fields" && el.customData.index === 0,
+  );
+  assert.equal(mFrame.x, 200);
+  assert.equal(mFrame.y, 100);
+  assert.ok(Math.abs(title.x + title.width / 2 - (mFrame.x + mFrame.width / 2)) < 0.5);
+  assert.equal(sepHead.x, mFrame.x);
+  assert.equal(sepHead.y, mFrame.y + 44);
+  assert.equal(field.x, mFrame.x + 16);
+  assert.ok(field.y >= mFrame.y + 44 && field.y + field.height <= mFrame.y + mFrame.height);
+  assert.equal(healClass(healed, gridId), null);
 });
 
 check("collapsed frame heals back to the header height", () => {

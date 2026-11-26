@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { isGridCell, isGridFrame, tableBounds } from "./table.js";
+import { isGridFrame } from "./table.js";
 
 /* Four clone handles that ride the edge of whichever table the pointer is over.
    Like GridOverlay it paints into an overlay above the Excalidraw canvases and
@@ -7,9 +7,11 @@ import { isGridCell, isGridFrame, tableBounds } from "./table.js";
    to the table without a React render per frame: only entering or leaving a
    table flips state, every other frame writes styles straight to the DOM. */
 
-/** How far outside a table the pointer may stray before the buttons leave. */
-const HIT_PAD = 18;
-/** Mousedown inside Excalidraw chrome is not a table hover. */
+/** How far outside a class the pointer may stray before the buttons leave. */
+const HIT_PAD = 30;
+/** Handles sit beside the frame, not on its border (screen px). */
+const HANDLE_GAP = 16;
+/** Mousedown inside Excalidraw chrome is not a class hover. */
 const IGNORE = ".relation-panel, .panel, .Island, .App-toolbar, .App-menu";
 
 const DIRECTIONS = [
@@ -32,42 +34,23 @@ function frameBox(el) {
 }
 
 /**
- * Topmost table under one scene point. Frames are the real bounds; tables from
- * before frames existed fall back to their cells. Scene order decides, so the
- * last hit wins like a z-order pick.
+ * Topmost ER class under one scene point. Only class frames participate:
+ * normal tables are a separate context and never get ER handles. Scene order
+ * decides, so the last hit wins like a z-order pick.
  */
-function tableAt(scene, x, y, pad = HIT_PAD) {
-  const framed = new Set();
-  for (const el of scene) {
-    if (isGridFrame(el) && el.customData?.grid) framed.add(el.customData.grid);
-  }
-
-  const candidates = [];
-  const seenLegacy = new Set();
-  for (const el of scene) {
-    if (isGridFrame(el) && el.customData?.grid) {
-      candidates.push({ grid: el.customData.grid, box: frameBox(el) });
-      continue;
-    }
-    if (!isGridCell(el)) continue;
-    const grid = el.customData.grid;
-    if (framed.has(grid) || seenLegacy.has(grid)) continue;
-    seenLegacy.add(grid);
-    const bounds = tableBounds(scene, grid);
-    if (bounds) candidates.push({ grid, box: bounds });
-  }
-
+function classAt(scene, x, y, pad = HIT_PAD) {
   let hit = null;
-  for (const candidate of candidates) {
-    const { box } = candidate;
+  for (const el of scene) {
+    if (!isGridFrame(el) || el.customData?.class !== true || !el.customData?.grid) continue;
+    const box = frameBox(el);
     if (x >= box.left - pad && x <= box.right + pad && y >= box.top - pad && y <= box.bottom + pad) {
-      hit = candidate;
+      hit = { grid: el.customData.grid, box };
     }
   }
   return hit;
 }
 
-export default function TableHoverArrows({ apiRef, canvasRef, onClone }) {
+export default function ErHoverArrows({ apiRef, canvasRef, onClone, enabled = true }) {
   const buttonRefs = useRef({});
   const pointerRef = useRef(null);
   const hoveredRef = useRef(null);
@@ -108,7 +91,7 @@ export default function TableHoverArrows({ apiRef, canvasRef, onClone }) {
         state.newElement ||
         state.selectionElement ||
         state.resizingElement;
-      const selecting = state.activeTool?.type === "selection" && !busy;
+      const selecting = enabled && state.activeTool?.type === "selection" && !busy;
 
       let hit = null;
       if (selecting && pointer) {
@@ -118,7 +101,7 @@ export default function TableHoverArrows({ apiRef, canvasRef, onClone }) {
         const sceneY = (pointer.clientY - rect.top) / zoom - scrollY;
         // the handles are a fixed 24 CSS px: pad in scene units so the outer
         // half of a handle still counts at low zoom
-        hit = tableAt(api.getSceneElements(), sceneX, sceneY, HIT_PAD / zoom);
+        hit = classAt(api.getSceneElements(), sceneX, sceneY, HIT_PAD / zoom);
       }
 
       const prev = hoveredRef.current;
@@ -134,17 +117,18 @@ export default function TableHoverArrows({ apiRef, canvasRef, onClone }) {
 
       const { box } = hit;
       const toScreen = (sceneX, sceneY) => [(sceneX + scrollX) * zoom, (sceneY + scrollY) * zoom];
-      const place = (direction, sceneX, sceneY) => {
+      const place = (direction, sceneX, sceneY, dx = 0, dy = 0) => {
         const el = buttonRefs.current[direction];
         if (!el) return;
         const [left, top] = toScreen(sceneX, sceneY);
-        el.style.left = `${left}px`;
-        el.style.top = `${top}px`;
+        el.style.left = `${left + dx}px`;
+        el.style.top = `${top + dy}px`;
       };
-      place("left", box.left, box.centerY);
-      place("right", box.right, box.centerY);
-      place("top", box.centerX, box.top);
-      place("bottom", box.centerX, box.bottom);
+      // beside the frame, never over its border
+      place("left", box.left, box.centerY, -HANDLE_GAP, 0);
+      place("right", box.right, box.centerY, HANDLE_GAP, 0);
+      place("top", box.centerX, box.top, 0, -HANDLE_GAP);
+      place("bottom", box.centerX, box.bottom, 0, HANDLE_GAP);
     };
 
     frame = window.requestAnimationFrame(paint);
@@ -153,7 +137,7 @@ export default function TableHoverArrows({ apiRef, canvasRef, onClone }) {
       host.removeEventListener("pointermove", onMove, true);
       host.removeEventListener("pointerleave", onLeave, true);
     };
-  }, [apiRef, canvasRef]);
+  }, [apiRef, canvasRef, enabled]);
 
   const handleClone = (direction) => {
     const target = hoveredRef.current;

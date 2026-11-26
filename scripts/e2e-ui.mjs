@@ -327,7 +327,7 @@ async function waitForBoardCount(min, timeout = 12000) {
   return count;
 }
 
-/* The extra tools (table, minimap, lasso) live behind one overflow button in
+/* The extra tools (table, ER class, minimap, lasso) live behind one overflow button in
    the drawing-tools row, so every test that used to click their own buttons
    opens the menu and picks the row by its Thai label. */
 async function openToolsMenu() {
@@ -662,7 +662,7 @@ async function openEditor(boardId = BOARD) {
       return { count: all.length, all, vw: innerWidth };
     })()`);
     check(
-      "one overflow button replaces the four extra tools in the row",
+      "one overflow button replaces the extra tools in the row",
       boardButtons.count === 1 && boardButtons.all[0].cls.includes("tools-more") && boardButtons.all.every((b) => b.inside && b.w > 20),      JSON.stringify(boardButtons),
     );
     check(
@@ -688,7 +688,7 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check(
       "the overflow menu lists the extra tools under its button",
-      menuBox.rows.join("|") === "เลเซอร์พอยต์|สร้างตาราง|แผนที่ย่อ|เลือกแบบบ่วง" &&
+      menuBox.rows.join("|") === "เลเซอร์พอยต์|สร้างตาราง|วาง ER class|แผนที่ย่อ|เลือกแบบบ่วง" &&
         menuBox.role === "menu" && menuBox.expanded === "true" && menuBox.inside && menuBox.under,
       JSON.stringify(menuBox),
     );
@@ -798,8 +798,8 @@ async function openEditor(boardId = BOARD) {
     await cdp.waitFor(`/แทรกตารางแล้ว/.test(document.querySelector(".panel .note")?.textContent || "")`, {
       label: "table inserted",
     });
-    const afterTable = await waitForBoardCount(beforeTable + 6);
-    check("table insertion saves elements", afterTable >= beforeTable + 6, `${beforeTable} -> ${afterTable}`);
+    const afterTable = await waitForBoardCount(beforeTable + 5);
+    check("table insertion saves elements", afterTable >= beforeTable + 5, `${beforeTable} -> ${afterTable}`);
     await cdp.click(".panel-head .icon-btn");
     await cdp.waitFor(`!document.querySelector(".panel")?.classList.contains("open")`, {
       label: "table panel close",
@@ -1434,20 +1434,23 @@ async function openEditor(boardId = BOARD) {
     await openEditor(REL_BOARD);
     await sleep(500);
 
-    await pickTool("สร้างตาราง");
-    await cdp.waitFor(`document.querySelector(".panel")?.classList.contains("open")`, {
-      label: "relation table panel",
+    await pickTool("วาง ER class");
+    await cdp.waitFor(`!!document.querySelector(".er-panel.open")`, { label: "ER panel" });
+    await cdp.waitFor(`window.__boardsApi.getSceneElements().some((el) => el.customData?.class && el.customData?.frame && !el.isDeleted)`, {
+      label: "ER class inserted",
     });
-    await sleep(300);
-    await cdp.click(".panel.open .panel-body > button.btn.wide");
-    await cdp.waitFor(`/แทรกตารางแล้ว/.test(document.querySelector(".panel .note")?.textContent || "")`, {
-      label: "relation table inserted",
-    });
-    await cdp.click(".panel-head .icon-btn");
-    await cdp.waitFor(`!document.querySelector(".panel")?.classList.contains("open")`, {
-      label: "relation table panel closed",
-    });
-    await sleep(900);
+    await cdp.waitFor(
+      `(() => {
+         const btn = document.querySelector(".er-panel.open .panel-head .icon-btn");
+         if (!btn) return false;
+         const r = btn.getBoundingClientRect();
+         return r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight;
+       })()`,
+      { label: "ER panel slid into view" },
+    );
+    await cdp.click(".er-panel .panel-head .icon-btn");
+    await cdp.waitFor(`!document.querySelector(".er-panel.open")`, { label: "ER panel closed" });
+    await sleep(400);
 
     await cdp.waitFor(
       `window.__boardsApi.getSceneElements().some((el) => el.customData?.frame && !el.isDeleted)`,
@@ -1455,7 +1458,7 @@ async function openEditor(boardId = BOARD) {
     );
     await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
-      const frame = api.getSceneElements().find((el) => el.customData?.frame && !el.isDeleted);
+      const frame = api.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
       api.scrollToContent(frame, { fitToContent: true, animate: false });
       return true;
     })()`);
@@ -1465,7 +1468,7 @@ async function openEditor(boardId = BOARD) {
       const s = api.getAppState();
       const zoom = s.zoom?.value || 1;
       const host = document.querySelector(".canvas").getBoundingClientRect();
-      const frame = api.getSceneElements().find((el) => el.customData?.frame && !el.isDeleted);
+      const frame = api.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
       return {
         x: host.left + (frame.x + frame.width / 2 + (s.scrollX || 0)) * zoom,
         y: host.top + (frame.y + frame.height / 2 + (s.scrollY || 0)) * zoom,
@@ -1479,7 +1482,7 @@ async function openEditor(boardId = BOARD) {
       buttons: 0,
     });
     await cdp.waitFor(`document.querySelector(".table-hover-arrows")?.classList.contains("visible")`, {
-      label: "hover arrows appear",
+      label: "ER hover arrows appear",
     });
     const hoverButtons = await cdp.evaluate(`(() => {
       const out = {};
@@ -1489,17 +1492,15 @@ async function openEditor(boardId = BOARD) {
       }
       return out;
     })()`);
-    check("table hover shows four directions", Object.keys(hoverButtons).length === 4, JSON.stringify(Object.keys(hoverButtons)));
+    check("ER class hover shows four directions", Object.keys(hoverButtons).length === 4, JSON.stringify(Object.keys(hoverButtons)));
 
-    // The button is the user target; clicking its DOM node keeps the test
-    // independent of Excalidraw's canvas pan/zoom animation timing.
     await cdp.evaluate(`document.querySelector('.table-hover-arrow[data-direction="right"]').click()`);
     await cdp.waitFor(`(() => {
       const api = window.__boardsApi;
       const els = api.getSceneElements();
-      const grids = new Set(els.filter((el) => Number.isFinite(el.customData?.r)).map((el) => el.customData.grid));
-      return grids.size === 2 && els.some((el) => el.type === "arrow" && el.customData?.relation);
-    })()`, { label: "clone and relation created" });
+      const frames = new Set(els.filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid));
+      return frames.size === 2 && els.some((el) => el.type === "arrow" && el.customData?.relation);
+    })()`, { label: "ER clone and relation created" });
     await sleep(500);
     const relation = await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
@@ -1507,17 +1508,16 @@ async function openEditor(boardId = BOARD) {
       const arrow = els.find((el) => el.type === "arrow" && el.customData?.relation);
       const from = arrow.customData.relation.fromGrid;
       const to = arrow.customData.relation.toGrid;
-      const cells = (grid) => els.filter((el) => el.customData?.grid === grid && Number.isFinite(el.customData?.r));
-      const frame = (grid) => els.find((el) => el.customData?.frame && el.customData.grid === grid);
-      const textIn = (grid) => els.filter((el) => el.type === "text" && el.containerId && cells(grid).some((c) => c.id === el.containerId)).length;
+      const frame = (grid) => els.find((el) => el.customData?.class && el.customData?.frame && el.customData.grid === grid);
       const fromFrame = frame(from);
       const toFrame = frame(to);
       return {
         from,
         to,
-        sourceCells: cells(from).length,
-        cloneCells: cells(to).length,
-        cloneTexts: textIn(to),
+        sourceTitle: fromFrame?.customData.classData?.title,
+        cloneTitle: toFrame?.customData.classData?.title,
+        cloneFields: toFrame?.customData.classData?.fields?.length,
+        cloneMethods: toFrame?.customData.classData?.methods?.length,
         sourceFrame: fromFrame && { x: fromFrame.x, y: fromFrame.y, w: fromFrame.width, h: fromFrame.height },
         cloneFrame: toFrame && { x: toFrame.x, y: toFrame.y, w: toFrame.width, h: toFrame.height },
         heads: [arrow.startArrowhead, arrow.endArrowhead],
@@ -1528,17 +1528,19 @@ async function openEditor(boardId = BOARD) {
       };
     })()`);
     check(
-      "clone copies the empty structure",
-      relation.cloneCells === relation.sourceCells && relation.cloneCells === 12 && relation.cloneTexts === 0,
+      "ER clone keeps the class name, fields and methods",
+      relation.cloneTitle === relation.sourceTitle &&
+        relation.cloneFields === 3 &&
+        relation.cloneMethods === 1,
       JSON.stringify(relation),
     );
     check(
-      "clone is placed to the right",
+      "ER clone is placed to the right",
       relation.cloneFrame.x >= relation.sourceFrame.x + relation.sourceFrame.w + 139,
       JSON.stringify(relation.cloneFrame),
     );
     check(
-      "relation arrow binds both frames",
+      "ER relation arrow binds both class frames",
       relation.start === `${relation.from}-frame` &&
         relation.end === `${relation.to}-frame` &&
         relation.sourceBound &&
@@ -1546,7 +1548,7 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(relation),
     );
     check(
-      "new relation defaults to 1:1",
+      "new ER relation defaults to 1:1",
       relation.heads[0] === "crowfoot_one" && relation.heads[1] === "crowfoot_one",
       String(relation.heads),
     );
@@ -1610,12 +1612,12 @@ async function openEditor(boardId = BOARD) {
     const persisted = await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
       const a = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
-      const grids = new Set(api.getSceneElements().filter((el) => Number.isFinite(el.customData?.r)).map((el) => el.customData.grid));
-      return { grids: grids.size, heads: [a?.startArrowhead, a?.endArrowhead], bound: (a?.startBinding?.elementId || "").endsWith("-frame") };
+      const frames = new Set(api.getSceneElements().filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid));
+      return { frames: frames.size, heads: [a?.startArrowhead, a?.endArrowhead], bound: (a?.startBinding?.elementId || "").endsWith("-frame") };
     })()`);
     check(
-      "relation and cardinality persist after reload",
-      persisted.grids === 2 &&
+      "ER relation and cardinality persist after reload",
+      persisted.frames === 2 &&
         persisted.heads[0] === "crowfoot_many" &&
         persisted.heads[1] === "crowfoot_many" &&
         persisted.bound,

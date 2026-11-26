@@ -118,6 +118,79 @@ export function describeClass(elements, gridId) {
   return readClassSpec(elements, gridId);
 }
 
+/** Scene-space band of one fields/methods row, or null. */
+export function classRowBounds(elements, gridId, section, index) {
+  const frame = findClassFrame(elements, gridId);
+  if (!frame) return null;
+  const spec = readClassSpec(elements, gridId);
+  if (!spec || spec.collapsed) return null;
+  const lines = section === "fields" ? spec.fields : section === "methods" ? spec.methods : [];
+  if (!Number.isInteger(index) || index < 0) return null;
+  if (lines.length === 0 ? index !== 0 : index >= lines.length) return null;
+  const fieldsH = sectionHeight(spec.fields);
+  const top =
+    section === "fields"
+      ? frame.y + HEADER_H + PAD_TOP + index * LINE_H
+      : frame.y + HEADER_H + fieldsH + PAD_TOP + index * LINE_H;
+  return {
+    grid: gridId,
+    section,
+    index,
+    left: frame.x,
+    top,
+    width: frame.width,
+    height: LINE_H,
+    centerY: top + LINE_H / 2,
+  };
+}
+
+/** Remove one or more selected rows from a class spec. */
+export function removeClassRows(spec, rows) {
+  const fields = [...(spec.fields || [])];
+  const methods = [...(spec.methods || [])];
+  const remove = (list, indices) => {
+    for (const index of [...indices].sort((a, b) => b - a)) list.splice(index, 1);
+  };
+  remove(
+    fields,
+    (rows || []).filter((row) => row.section === "fields").map((row) => row.index),
+  );
+  remove(
+    methods,
+    (rows || []).filter((row) => row.section === "methods").map((row) => row.index),
+  );
+  return { fields, methods };
+}
+
+/** Which fields/methods row is under a scene point, or null. */
+export function classRowAt(elements, gridId, x, y) {
+  const frame = findClassFrame(elements, gridId);
+  if (!frame) return null;
+  if (x < frame.x || x > frame.x + frame.width) return null;
+  const spec = readClassSpec(elements, gridId);
+  if (!spec || spec.collapsed) return null;
+  const fieldsH = sectionHeight(spec.fields);
+  const fieldsTop = frame.y + HEADER_H + PAD_TOP;
+  if (spec.fields.length === 0) {
+    if (y >= fieldsTop && y < fieldsTop + LINE_H) {
+      return classRowBounds(elements, gridId, "fields", 0);
+    }
+  } else if (y >= fieldsTop && y < fieldsTop + spec.fields.length * LINE_H) {
+    const index = Math.floor((y - fieldsTop) / LINE_H);
+    return classRowBounds(elements, gridId, "fields", index);
+  }
+  const methodsTop = frame.y + HEADER_H + fieldsH + PAD_TOP;
+  if (spec.methods.length === 0) {
+    if (y >= methodsTop && y < methodsTop + LINE_H) {
+      return classRowBounds(elements, gridId, "methods", 0);
+    }
+  } else if (y >= methodsTop && y < methodsTop + spec.methods.length * LINE_H) {
+    const index = Math.floor((y - methodsTop) / LINE_H);
+    return classRowBounds(elements, gridId, "methods", index);
+  }
+  return null;
+}
+
 /** Build a fresh class node at its own local origin (0,0). */
 export function buildClass({
   gridId,
@@ -358,11 +431,39 @@ export function healClass(elements, gridId) {
         fontSize,
         width,
         height: textHeight,
-        x: round((w - width) / 2),
-        y: round((HEADER_H - textHeight) / 2),
+        x: round(frame.x + (w - width) / 2),
+        y: round(frame.y + (HEADER_H - textHeight) / 2),
       };
       const changed = Object.entries(patch).some(([key, value]) => !same(titleEl[key], value));
       if (changed) letter[titleEl.id] = bumpElement(titleEl, patch);
+    }
+    const cToggle = elements.find(
+      (el) =>
+        !el.isDeleted &&
+        el.customData?.grid === gridId &&
+        el.customData?.classToggle &&
+        el.type === "rectangle",
+    );
+    if (cToggle) {
+      const x = frame.x + 8;
+      const y = frame.y + 8;
+      if (cToggle.x !== x || cToggle.y !== y) {
+        letter[cToggle.id] = bumpElement(cToggle, { x, y });
+      }
+    }
+    const cToggleText = elements.find(
+      (el) =>
+        !el.isDeleted &&
+        el.customData?.grid === gridId &&
+        el.customData?.classToggle &&
+        el.type === "text",
+    );
+    if (cToggleText) {
+      const x = round(frame.x + 8 + (16 - cToggleText.width) / 2);
+      const y = round(frame.y + 8 + (16 - cToggleText.height) / 2);
+      if (cToggleText.x !== x || cToggleText.y !== y) {
+        letter[cToggleText.id] = bumpElement(cToggleText, { x, y });
+      }
     }
     return Object.keys(letter).length ? elements.map((el) => letter[el.id] ?? el) : null;
   }
@@ -407,8 +508,8 @@ export function healClass(elements, gridId) {
       fontSize,
       width,
       height: textHeight,
-      x: round((w - width) / 2),
-      y: round((HEADER_H - textHeight) / 2),
+      x: round(frame.x + (w - width) / 2),
+      y: round(frame.y + (HEADER_H - textHeight) / 2),
     });
   }
 
@@ -424,8 +525,8 @@ export function healClass(elements, gridId) {
       fontSize,
       width,
       height: textHeight,
-      x: PAD_X,
-      y: round(y + (LINE_H - textHeight) / 2),
+      x: round(frame.x + PAD_X),
+      y: round(frame.y + y + (LINE_H - textHeight) / 2),
     });
   };
 
@@ -447,13 +548,16 @@ export function healClass(elements, gridId) {
   for (const el of elements) {
     if (el.type !== "line" || el.isDeleted || el.customData?.grid !== gridId) continue;
     if (el.id === `${gridId}-sep-head`) {
-      if (el.x !== 0 || el.y !== HEADER_H || el.width !== w) {
-        letter[el.id] = bumpElement(el, { x: 0, y: HEADER_H, width: w });
+      const x = frame.x;
+      const y = frame.y + HEADER_H;
+      if (el.x !== x || el.y !== y || el.width !== w) {
+        letter[el.id] = bumpElement(el, { x, y, width: w });
       }
     } else if (el.id === `${gridId}-sep-fields`) {
-      const y = HEADER_H + fieldsH;
-      if (el.x !== 0 || el.y !== y || el.width !== w) {
-        letter[el.id] = bumpElement(el, { x: 0, y, width: w });
+      const x = frame.x;
+      const y = frame.y + HEADER_H + fieldsH;
+      if (el.x !== x || el.y !== y || el.width !== w) {
+        letter[el.id] = bumpElement(el, { x, y, width: w });
       }
     }
   }
@@ -462,8 +566,20 @@ export function healClass(elements, gridId) {
     (el) => !el.isDeleted && el.customData?.grid === gridId && el.customData?.classToggle && el.type === "rectangle",
   );
   if (toggle) {
-    if (toggle.x !== 8 || toggle.y !== 8) {
-      letter[toggle.id] = bumpElement(toggle, { x: 8, y: 8 });
+    const x = frame.x + 8;
+    const y = frame.y + 8;
+    if (toggle.x !== x || toggle.y !== y) {
+      letter[toggle.id] = bumpElement(toggle, { x, y });
+    }
+  }
+  const toggleText = elements.find(
+    (el) => !el.isDeleted && el.customData?.grid === gridId && el.customData?.classToggle && el.type === "text",
+  );
+  if (toggleText) {
+    const x = round(frame.x + 8 + (16 - toggleText.width) / 2);
+    const y = round(frame.y + 8 + (16 - toggleText.height) / 2);
+    if (toggleText.x !== x || toggleText.y !== y) {
+      letter[toggleText.id] = bumpElement(toggleText, { x, y });
     }
   }
 

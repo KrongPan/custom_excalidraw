@@ -3,11 +3,22 @@ import { createPortal } from "react-dom";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import TableBuilder from "./TableBuilder.jsx";
+import ErBuilder from "./ErBuilder.jsx";
 import GridOverlay from "./GridOverlay.jsx";
-import { buildClass, describeClass, healClass, isClassGrid, toggleClass, updateClass } from "./class.js";
+import {
+  buildClass,
+  classRowAt,
+  describeClass,
+  healClass,
+  isClassGrid,
+  removeClassRows,
+  toggleClass,
+  updateClass,
+} from "./class.js";
 import RelationPanel from "./RelationPanel.jsx";
 import RelationWaypoints from "./RelationWaypoints.jsx";
-import TableHoverArrows from "./TableHoverArrows.jsx";
+import ErHoverArrows from "./ErHoverArrows.jsx";
+import ErRowControls from "./ErRowControls.jsx";
 import Minimap from "./Minimap.jsx";
 import LassoTool, { IconLasso } from "./tools/LassoTool.jsx";
 import ToolMenu from "./ToolMenu.jsx";
@@ -60,6 +71,16 @@ const IconTable = () => (
     <rect x="2.4" y="3.4" width="12.6" height="12.2" rx="2.1" />
     <path d="M2.4 7.3h12.6M6.6 7.3v8.3M10.8 7.3v8.3" />
     <path d="M19.6 15.6v5.6M16.8 18.4h5.6" strokeWidth={2.1} />
+  </svg>
+);
+
+/* ER plugin: a class box with a title bar and two content sections. */
+const IconEr = () => (
+  <svg {...icon} width={17} height={17} strokeWidth={1.6}>
+    <rect x="3" y="3" width="18" height="18" rx="2.4" />
+    <path d="M3 9.2h18M3 14.6h18" />
+    <path d="M6.2 6.4h4" strokeWidth={1.9} />
+    <path d="M6.2 12h6M6.2 17.2h8" />
   </svg>
 );
 
@@ -282,10 +303,12 @@ export default function App() {
   const [scene, setScene] = useState(null);
   const [fatal, setFatal] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [erPanelOpen, setErPanelOpen] = useState(false);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [lassoArmed, setLassoArmed] = useState(false);
   const [selectedGrid, setSelectedGrid] = useState(null);
   const [selectedClass, setSelectedClass] = useState(null);
+  const [activeClassRows, setActiveClassRows] = useState([]);
   const [selectedRelation, setSelectedRelation] = useState(null);
   const [activeCell, setActiveCell] = useState(null);
   const [peers, setPeers] = useState([]);
@@ -1153,6 +1176,59 @@ export default function App() {
     onChangeRef.current = onChange;
   }, [onChange]);
 
+  // Selecting an ER class opens its editor; the normal table panel is a
+  // different context and closes. Closing the ER panel manually stays closed
+  // until another class is selected.
+  useEffect(() => {
+    // keep a row that belongs to the newly selected class (the pointerdown
+    // handler sets it first), but clear targets left over from another class
+    setActiveClassRows((prev) =>
+      prev.length && prev[0].grid === (selectedClass?.grid ?? null) ? prev : [],
+    );
+    if (selectedClass) {
+      setErPanelOpen(true);
+      setPanelOpen(false);
+    } else {
+      setErPanelOpen(false);
+    }
+  }, [selectedClass?.grid]);
+
+  /** Re-align class content to its frame after load/selection/drag. */
+  const repairClasses = useCallback((api) => {
+    if (!api) return;
+    const scene = api.getSceneElements();
+    let healed = scene;
+    const grids = new Set(
+      scene
+        .filter((el) => el.customData?.grid && !el.isDeleted)
+        .map((el) => el.customData.grid),
+    );
+    for (const gridId of grids) {
+      if (!isClassGrid(healed, gridId)) continue;
+      const next = healClass(healed, gridId);
+      if (next) healed = next;
+    }
+    if (healed !== scene) api.updateScene({ elements: healed, captureUpdate: "NEVER" });
+  }, []);
+
+  useEffect(() => {
+    if (!selectedClass) return;
+    repairClasses(apiRef.current);
+  }, [selectedClass?.grid, repairClasses]);
+
+  useEffect(() => {
+    if (phase !== "ready") return undefined;
+    const host = canvasRef.current;
+    if (!host) return undefined;
+    const onUp = () => window.setTimeout(() => repairClasses(apiRef.current), 0);
+    host.addEventListener("pointerup", onUp, true);
+    const loadTimer = window.setTimeout(() => repairClasses(apiRef.current), 300);
+    return () => {
+      host.removeEventListener("pointerup", onUp, true);
+      window.clearTimeout(loadTimer);
+    };
+  }, [phase, repairClasses]);
+
   // flush on hide (covers tab close / switching away far more reliably than unload)
   useEffect(() => {
     const onHide = () => {
@@ -1714,29 +1790,6 @@ export default function App() {
       const api = apiRef.current;
       if (!api) throw new Error("editor ยังไม่พร้อม");
 
-      if (spec.kind === "class") {
-        const built = buildClass(spec);
-        const current = api.getSceneElements();
-        let right = -Infinity;
-        for (const el of current) {
-          if (el.isDeleted) continue;
-          right = Math.max(right, el.x + (el.width || 0));
-        }
-        const offsetX = Number.isFinite(right) ? Math.round(right) + 120 : 0;
-        const placed = built.elements.map((el) => ({ ...el, x: el.x + offsetX }));
-        api.updateScene({
-          elements: [...current, ...placed],
-          appState: { selectedElementIds: { [built.frameId]: true } },
-        });
-        try {
-          api.scrollToContent(placed, { fitToContent: false, animate: true });
-        } catch {
-          /* scrolling is a nicety */
-        }
-        queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
-        return placed.length;
-      }
-
       const { elements: fresh } = buildGrid(spec);
       const current = api.getSceneElements();
 
@@ -1772,9 +1825,13 @@ export default function App() {
         kind: "class",
       });
       if (!result) return 0;
+      const selectedElementIds = {};
+      for (const el of result.elements) {
+        if (el.customData?.grid === meta.grid) selectedElementIds[el.id] = true;
+      }
       api.updateScene({
         elements: result.elements,
-        appState: { selectedElementIds: { [result.frameId]: true } },
+        appState: { selectedElementIds },
         captureUpdate: "IMMEDIATELY",
       });
       const after = api.getSceneElements();
@@ -1792,6 +1849,98 @@ export default function App() {
     },
     [queueSave],
   );
+
+  /** Add a fields/methods row below the selected ER row. */
+  const addClassRow = useCallback(
+    ({ grid, section, index }) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const spec = describeClass(api.getSceneElements(), grid);
+      if (!spec) return;
+      const key = section === "fields" ? "fields" : "methods";
+      const lines = [...(spec[key] || [])];
+      const insertAt = Math.min(Math.max(0, index + 1), lines.length);
+      lines.splice(
+        insertAt,
+        0,
+        section === "fields" ? "+ field: type" : "+ method(type): type",
+      );
+      const result = updateClass(api.getSceneElements(), grid, { [key]: lines });
+      if (!result) return;
+      const selectedElementIds = {};
+      for (const el of result.elements) {
+        if (el.customData?.grid === grid) selectedElementIds[el.id] = true;
+      }
+      api.updateScene({
+        elements: result.elements,
+        appState: { selectedElementIds },
+        captureUpdate: "IMMEDIATELY",
+      });
+      setActiveClassRows([{ grid, section, index: insertAt }]);
+      queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    },
+    [queueSave],
+  );
+
+  /** Delete every selected fields/methods row in one undo step. */
+  const deleteClassRows = useCallback(
+    (rows) => {
+      const api = apiRef.current;
+      const first = rows?.[0];
+      if (!api || !first) return;
+      const spec = describeClass(api.getSceneElements(), first.grid);
+      if (!spec) return;
+      const selected = rows.filter((row) => row.grid === first.grid);
+      const { fields, methods } = removeClassRows(spec, selected);
+      const result = updateClass(api.getSceneElements(), first.grid, { fields, methods });
+      if (!result) return;
+      const selectedElementIds = {};
+      for (const el of result.elements) {
+        if (el.customData?.grid === first.grid) selectedElementIds[el.id] = true;
+      }
+      api.updateScene({
+        elements: result.elements,
+        appState: { selectedElementIds },
+        captureUpdate: "IMMEDIATELY",
+      });
+      setActiveClassRows([]);
+      queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    },
+    [queueSave],
+  );
+
+  /** ER toolbar button: place a default class at the viewport centre. */
+  const insertErClass = useCallback(() => {
+    const api = apiRef.current;
+    const host = canvasRef.current;
+    if (!api || !host) return;
+    const built = buildClass({
+      title: "Classname",
+      fields: ["+ field: type", "+ field: type", "+ field: type"],
+      methods: ["+ method(type): type"],
+      width: 320,
+    });
+    const state = api.getAppState();
+    const zoom = state.zoom?.value || 1;
+    const rect = host.getBoundingClientRect();
+    const sceneX = rect.width / 2 / zoom - (state.scrollX || 0);
+    const sceneY = rect.height / 2 / zoom - (state.scrollY || 0);
+    const frame = built.elements.find((el) => el.id === built.frameId);
+    if (!frame) return;
+    const dx = Math.round(sceneX - frame.width / 2);
+    const dy = Math.round(sceneY - frame.height / 2);
+    const placed = built.elements.map((el) => ({ ...el, x: el.x + dx, y: el.y + dy }));
+    const selectedElementIds = {};
+    for (const el of placed) selectedElementIds[el.id] = true;
+    api.updateScene({
+      elements: [...api.getSceneElements(), ...placed],
+      appState: { selectedElementIds },
+      captureUpdate: "IMMEDIATELY",
+    });
+    queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    setPanelOpen(false);
+    setErPanelOpen(true);
+  }, [canvasRef, queueSave]);
 
   /** Clone the table under a hover handle, then link source and clone. */
   const cloneTable = useCallback(
@@ -1905,16 +2054,84 @@ export default function App() {
       event.stopPropagation();
       const result = toggleClass(api.getSceneElements(), hit.customData.grid);
       if (!result) return;
+      const selectedElementIds = {};
+      for (const el of result.elements) {
+        if (el.customData?.grid === hit.customData.grid) selectedElementIds[el.id] = true;
+      }
       api.updateScene({
         elements: result.elements,
-        appState: { selectedElementIds: { [result.frameId]: true } },
+        appState: { selectedElementIds },
         captureUpdate: "IMMEDIATELY",
       });
+      setActiveClassRows([]);
       queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
     };
     host.addEventListener("pointerdown", onDown, true);
     return () => host.removeEventListener("pointerdown", onDown, true);
   }, [phase, queueSave, scene]);
+
+  /* Which ER fields/methods row was clicked? The row overlay uses this to
+     highlight the band and show its +/− controls. */
+  useEffect(() => {
+    if (phase !== "ready") return undefined;
+    const host = canvasRef.current;
+    if (!host) return undefined;
+    const onDown = (event) => {
+      const api = apiRef.current;
+      if (!api || event.button !== 0) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".er-row-controls, .relation-panel, .panel, .Island, .App-toolbar")
+      ) {
+        return;
+      }
+      const state = api.getAppState();
+      const zoom = state.zoom?.value || 1;
+      const rect = host.getBoundingClientRect();
+      const sceneX = (event.clientX - rect.left) / zoom - (state.scrollX || 0);
+      const sceneY = (event.clientY - rect.top) / zoom - (state.scrollY || 0);
+      const elements = api.getSceneElements();
+      let grid = null;
+      for (const el of elements) {
+        if (!el.customData?.class || !el.customData?.frame || el.isDeleted) continue;
+        if (
+          sceneX >= el.x &&
+          sceneX <= el.x + el.width &&
+          sceneY >= el.y &&
+          sceneY <= el.y + el.height
+        ) {
+          grid = el.customData.grid;
+        }
+      }
+      if (!grid) {
+        setActiveClassRows([]);
+        return;
+      }
+      const row = classRowAt(elements, grid, sceneX, sceneY);
+      if (!row) {
+        setActiveClassRows([]);
+        return;
+      }
+      const target = { grid: row.grid, section: row.section, index: row.index };
+      const shift = event.shiftKey;
+      setActiveClassRows((prev) => {
+        if (!shift) return [target];
+        if (!prev.length || prev[0].grid !== target.grid) return [target];
+        const exists = prev.some(
+          (item) =>
+            item.section === target.section && item.index === target.index,
+        );
+        return exists
+          ? prev.filter(
+              (item) =>
+                !(item.section === target.section && item.index === target.index),
+            )
+          : [...prev, target];
+      });
+    };
+    host.addEventListener("pointerdown", onDown, true);
+    return () => host.removeEventListener("pointerdown", onDown, true);
+  }, [phase, scene]);
 
   /* ---------------------------------------------------------------- render */
 
@@ -2051,7 +2268,17 @@ export default function App() {
       hint: "ตาราง · UML",
       icon: <IconTable />,
       active: panelOpen,
-      onSelect: () => setPanelOpen((value) => !value),
+      onSelect: () => {
+        setErPanelOpen(false);
+        setPanelOpen((value) => !value);
+      },
+    },
+    {
+      key: "er",
+      label: "วาง ER class",
+      hint: "ER · UML",
+      icon: <IconEr />,
+      onSelect: insertErClass,
     },
     {
       key: "minimap",
@@ -2123,7 +2350,19 @@ export default function App() {
           }}
         />
         <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
-        <TableHoverArrows apiRef={apiRef} canvasRef={canvasRef} onClone={cloneTable} />
+        <ErHoverArrows
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          onClone={cloneTable}
+          enabled={activeClassRows.length === 0}
+        />
+        <ErRowControls
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          activeRows={activeClassRows}
+          onAdd={addClassRow}
+          onDelete={deleteClassRows}
+        />
         <RelationPanel
           apiRef={apiRef}
           canvasRef={canvasRef}
@@ -2172,16 +2411,21 @@ export default function App() {
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
         onInsert={insertTable}
-        selected={selectedClass ?? selectedGrid}
-        onUpdate={(spec) =>
-          spec.kind === "class" ? applyClass(selectedClass, spec) : applyGrid(selectedGrid, spec)
-        }
+        selected={selectedGrid}
+        onUpdate={(spec) => applyGrid(selectedGrid, spec)}
         onGrow={(axis) => growGrid(selectedGrid, axis)}
-        active={selectedClass ? null : activeCell}
+        active={activeCell}
         onResizeRow={(r, h) => resizeRow(selectedGrid, r, h)}
         onResizeCol={(c, w) => resizeCol(selectedGrid, c, w)}
         onPreviewRow={(r, h) => previewResize(selectedGrid, "row", r, h)}
         onPreviewCol={(c, w) => previewResize(selectedGrid, "col", c, w)}
+      />
+
+      <ErBuilder
+        open={erPanelOpen}
+        onClose={() => setErPanelOpen(false)}
+        selected={selectedClass}
+        onUpdate={(spec) => applyClass(selectedClass, spec)}
       />
     </div>
   );
