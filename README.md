@@ -30,6 +30,7 @@ http://localhost:5001          # catalog + ตัวแก้ไข อยู่
 - **Lasso**: ลากเส้นรอบสิ่งที่ต้องการเลือก (Excalidraw 0.18 ยังไม่มี lasso ในตัว) — `Esc` ยกเลิก
 - **แคปซูลสถานะการบันทึก** มุมขวาบน: `กำลังบันทึก…` → `บันทึกแล้ว HH:MM` / `บันทึกไม่สำเร็จ` (กดเพื่อลองใหม่)
 - **คนในกระดาน**: avatar stack เกาะอยู่ในแถวเมนูขวาบนของ Excalidraw ข้างปุ่ม `Library`
+- **ปากกาเลเซอร์**: ปุ่มไอคอนเลเซอร์ท้ายแถวเครื่องมือ (ก่อนปุ่ม `ตาราง`) — กดค้างแล้วลาก จะเห็นเส้นสีแดงจางหายเหมือน excalidraw.com และคนอื่นในกระดานเห็นเส้นเดียวกัน (สีเดียวกับสีชื่อของคนนั้น) กดปุ่มเดิมซ้ำหรือคีย์ `K` ขณะโฟกัสบนกระดานเพื่อกลับไปโหมดเลือก; หัวลูกศรของคนอื่นยังปิดไว้ เห็นกันแค่เส้นเลเซอร์
 
 **ตัวสร้างตาราง**
 
@@ -214,7 +215,7 @@ WebSocket: `/ws/board/<id>?name=<ชื่อผู้ใช้>&sid=<รหั�
 ```bash
 node scripts/test-board-storage.mjs    # โฟลเดอร์ต่อกระดาน, history, meta, DELETE
 node scripts/test-board-meta.mjs       # เปลี่ยนชื่อ/คำอธิบาย + broadcast
-node scripts/test-board-presence.mjs   # presence, sid ซ้ำ, heartbeat
+node scripts/test-board-presence.mjs   # presence, sid ซ้ำ, heartbeat, relay เฟรม pointer/เลเซอร์
 node scripts/test-preview-watcher.mjs  # พรีวิว render ครั้งแรก, แก้ scene แล้ว render ใหม่, stamp ตาม scene
 node scripts/test-grid-resize.mjs      # ตาราง: ย่อ/ขยายแถวและคอลัมน์
 node scripts/soak-table.mjs --seed 1   # property test ของตาราง (สุ่มแก้แล้วตรวจ invariant ทุกก้าว)
@@ -282,6 +283,7 @@ docker compose up -d --build
 ## ข้อจำกัด
 
 - ไม่มีระบบสิทธิ์/login — ใครเข้าถึงพอร์ตได้ก็แก้ได้ ควรวางไว้หลัง LAN, VPN หรือ reverse proxy ที่มี auth
-- ไม่มี remote cursor (เซิร์ฟเวอร์รับ `{type:"pointer"}` ไว้แล้ว แต่ฝั่งเว็บยังไม่ส่ง)
+- ไม่มี remote cursor เป็นหัวลูกศรตามคนอื่น (ตั้งใจปิดด้วย `renderCursor: false`) — เห็นกันเฉพาะเส้นเลเซอร์; เฟรม `{type:"pointer"}` ส่งเฉพาะตอนใช้ปากกาเลเซอร์ (จำกัด ~30 เฟรม/วินาที) ไม่ได้ส่งตลอดเวลา
 - ถ้าสองคนแก้ **element เดียวกัน** พร้อมกัน ตัวที่มาหลังสุดชนะ
 - ลิงก์แชร์แบบ Excalidraw+ (`#json=<id>,<key>`) ใช้ไม่ได้ — ลิงก์ของเราคือ `/b/<id>`
+- บนมือถือซ่อนปุ่มเลเซอร์/ตาราง/minimap/lasso (แถวเครื่องมือมีที่จำกัด)

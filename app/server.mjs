@@ -1149,7 +1149,21 @@ live.on("connection", (ws, request, id) => {
       const x = Number(message.x);
       const y = Number(message.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      broadcast(id, { type: "pointer", from: ws.peerId, color: ws.peerColor, x, y }, ws);
+      // a laser packet carries the pointer mode and the button state, so the
+      // other tab can draw a trail between the points instead of a dot
+      broadcast(
+        id,
+        {
+          type: "pointer",
+          from: ws.peerId,
+          color: ws.peerColor,
+          x,
+          y,
+          tool: message.tool === "laser" ? "laser" : "pointer",
+          button: message.button === "down" ? "down" : "up",
+        },
+        ws,
+      );
     }
   });
 

@@ -305,6 +305,59 @@ try {
     await observer.waitFor((s) => s.peers?.length === 2, "back to two peers");
   });
 
+  await step("a laser pointer frame is relayed with its tool and button", async () => {
+    const sender = connectBoard(port, id, { sid: "tab-laser-0001", name: "laser" });
+    await sender.opened;
+    await sender.waitFor((s) => s.you !== null, "the laser sender's welcome");
+    const mark = observer.messages.length;
+    sender.ws.send(JSON.stringify({ type: "pointer", x: 120.5, y: -40, tool: "laser", button: "down" }));
+    await observer.waitFor(
+      (s) => s.messages.slice(mark).some((m) => m.type === "pointer" && m.x === 120.5),
+      "the relayed laser frame",
+    );
+    const frame = observer.messages.slice(mark).find((m) => m.type === "pointer" && m.x === 120.5);
+    assert.equal(frame.y, -40);
+    assert.equal(frame.tool, "laser");
+    assert.equal(frame.button, "down");
+    assert.equal(frame.from, sender.you.id);
+    assert.equal(typeof frame.color, "string");
+
+    const released = observer.messages.length;
+    sender.ws.send(JSON.stringify({ type: "pointer", x: 121, y: -39, tool: "laser", button: "up" }));
+    await observer.waitFor(
+      (s) => s.messages.slice(released).some((m) => m.type === "pointer" && m.button === "up"),
+      "the released laser frame",
+    );
+    await sender.close();
+  });
+
+  await step("a pointer frame without a tool reads as the cursor", async () => {
+    const sender = connectBoard(port, id, { sid: "tab-pointer-001", name: "pointer" });
+    await sender.opened;
+    const mark = observer.messages.length;
+    sender.ws.send(JSON.stringify({ type: "pointer", x: 7, y: 8 }));
+    await observer.waitFor(
+      (s) => s.messages.slice(mark).some((m) => m.type === "pointer" && m.x === 7),
+      "the plain pointer frame",
+    );
+    const frame = observer.messages.slice(mark).find((m) => m.type === "pointer" && m.x === 7);
+    assert.equal(frame.tool, "pointer");
+    assert.equal(frame.button, "up");
+    await sender.close();
+  });
+
+  await step("a malformed pointer frame is dropped and keeps the socket", async () => {
+    const sender = connectBoard(port, id, { sid: "tab-badptr-001", name: "bad pointer" });
+    await sender.opened;
+    const mark = observer.messages.length;
+    sender.ws.send(JSON.stringify({ type: "pointer", x: "left", y: 2, tool: "laser", button: "down" }));
+    sender.ws.send(JSON.stringify({ type: "pointer" }));
+    await sleep(250);
+    assert.equal(observer.messages.slice(mark).filter((m) => m.type === "pointer").length, 0);
+    assert.equal(sender.ws.readyState, 1);
+    await sender.close();
+  });
+
   await step("heartbeat drops a socket that stops answering", async () => {
     const silent = await silentSocket(port, id);
     assert.match(silent.status, /101 Switching Protocols/);

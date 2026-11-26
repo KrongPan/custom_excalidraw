@@ -264,7 +264,7 @@ body {
   gap: 6px;
   pointer-events: auto;
 }
-.top-actions.docked .save-pill { height: 29px; padding: 0 10px 0 9px; gap: 6px; font-size: 11.5px; border-radius: 10px; }
+.top-actions.docked .save-pill { height: 33px; padding: 0 11px 0 10px; gap: 7px; font-size: 12.5px; border-radius: 11px; }
 
 .theme-toggle {
   display: inline-flex;
@@ -300,10 +300,10 @@ body {
   height: 17px;
 }
 .top-actions.docked .theme-toggle {
-  width: 29px;
-  height: 29px;
+  width: 33px;
+  height: 33px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   background: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -315,14 +315,14 @@ body {
   color: var(--ink);
 }
 .top-actions.docked .theme-toggle svg {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
 }
 .presence.docked {
   position: static;
-  height: 29px;
+  height: 33px;
   padding: 0;
-  gap: 6px;
+  gap: 7px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -333,9 +333,9 @@ body {
   pointer-events: auto;
 }
 .presence.docked .presence-avatar {
-  width: 25px;
-  height: 25px;
-  font-size: 10.5px;
+  width: 28px;
+  height: 28px;
+  font-size: 11.5px;
 }
 
 .presence-avatars {
@@ -477,6 +477,20 @@ body {
 .canvas .excalidraw {
   --island-bg-color: var(--island-bg);
   --popup-bg-color: var(--popup-bg);
+  /* Excalidraw's own row is sized for a 1920+ display; a laptop sits below that
+     breakpoint, so ask for the large metrics here too instead of shrinking
+     every icon by hand. */
+  --lg-button-size: 2.5rem;
+  --lg-icon-size: 1.25rem;
+  --default-button-size: 2.25rem;
+  --default-icon-size: 1.15rem;
+}
+
+/* The laser rides the collaborator layer for its remote trails, which also
+   brings Excalidraw's own presence list; the board already shows one pill. */
+.canvas .excalidraw .UserList__wrapper,
+.canvas .excalidraw .UserList_mobile {
+  display: none;
 }
 .canvas .excalidraw .Island {
   backdrop-filter: blur(14px) saturate(150%);
@@ -573,24 +587,25 @@ body {
   opacity: 0.62;
 }
 
-/* The table builder's entry point sits inside the drawing-tools row, so it
-   borrows the native tool metrics (29.25px box, 6.5px radius). */
+/* Row buttons (laser, table, minimap) borrow the native tool metrics:
+   a 33px box inside the 2.25rem row, 7.5px radius. */
 .tools-table-slot {
   display: inline-flex;
   align-items: center;
   flex: none;
   margin: 0 1px;
 }
-.tools-table {
+.tools-table,
+.tools-laser {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 29px;
-  height: 29px;
+  width: 33px;
+  height: 33px;
   padding: 0;
   border: 0;
-  border-radius: 6.5px;
+  border-radius: 7.5px;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -600,14 +615,17 @@ body {
     background 0.12s ease,
     color 0.12s ease;
 }
-.tools-table:hover {
+.tools-table:hover,
+.tools-laser:hover {
   background: rgba(0, 0, 0, 0.055);
 }
-.tools-table:focus-visible {
+.tools-table:focus-visible,
+.tools-laser:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.tools-table.active {
+.tools-table.active,
+.tools-laser.active {
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -1003,7 +1021,7 @@ code {
   position: absolute;
   left: 14px;
   bottom: 54px;
-  width: 200px;
+  width: 214px;
   z-index: 5;
   border: 1px solid var(--glass-line);
   border-radius: 9px;
@@ -1018,7 +1036,7 @@ code {
 .minimap-map {
   display: block;
   width: 100%;
-  height: 118px;
+  height: 128px;
   cursor: grab;
   touch-action: none;
 }
@@ -1030,16 +1048,16 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 22px;
-  padding: 0 9px;
+  height: 25px;
+  padding: 0 10px;
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
 }
 .minimap-zoom {
   color: var(--accent);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -1049,11 +1067,11 @@ code {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 29px;
-  height: 29px;
+  width: 33px;
+  height: 33px;
   padding: 0;
   border: 0;
-  border-radius: 6.5px;
+  border-radius: 7.5px;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1089,8 +1107,8 @@ code {
   right: 5px;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 1px solid var(--glass-line);
   border-radius: 50%;
@@ -1117,9 +1135,9 @@ code {
   z-index: 45;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 11px 0 9px;
+  gap: 7px;
+  height: 36px;
+  padding: 0 12px 0 10px;
   border: 1px solid var(--glass-line);
   border-radius: 11px;
   background: var(--frost);
@@ -1128,7 +1146,7 @@ code {
   box-shadow: var(--shadow);
   color: var(--muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
   transition:
     color 0.12s ease,
@@ -1145,9 +1163,11 @@ code {
 
 /* phones: keep the card small and clear of the zoom footer */
 @media (max-width: 560px) {
-  /* the tools row fits the table button and nothing more: two extra 29px
-     buttons push the fold control past the island edge, so the minimap and
-     lasso toggles step aside and the card folds to its pill instead. */
+  /* the tools row fits the table button and not much more: the extra 33px
+     buttons push the fold control past the island edge, so the minimap, lasso
+     and laser toggles step aside and the card folds to its pill instead. The
+     laser is a mouse gesture, so it has no place on a touch screen anyway. */
+  .tools-laser,
   .tools-minimap,
   .tools-lasso {
     display: none;

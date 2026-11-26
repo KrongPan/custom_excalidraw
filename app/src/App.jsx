@@ -75,6 +75,16 @@ const IconSun = () => (
   </svg>
 );
 
+/* Same pen Excalidraw uses for the laser tool, drawn at the row's icon size. */
+const IconLaser = () => (
+  <svg {...icon} viewBox="0 0 20 20" width={18} height={18}>
+    <g transform="rotate(90 10 10)" strokeWidth={1.5}>
+      <path d="m9.644 13.69 7.774-7.773a2.357 2.357 0 0 0-3.334-3.334l-7.773 7.774L8 12l1.643 1.69Z" />
+      <path d="m13.25 3.417 3.333 3.333M10 10l2-2M5 15l3-3M2.156 17.894l1-1M5.453 19.029l-.144-1.407M2.377 11.887l.866 1.118M8.354 17.273l-1.194-.758M.953 14.652l1.408.13" />
+    </g>
+  </svg>
+);
+
 /* Same metrics as the table button: a map frame with the viewport inside. */
 const IconMinimap = () => (
   <svg {...icon} width={17} height={17} strokeWidth={1.6}>
@@ -333,6 +343,9 @@ export default function App() {
   // DOM slot inside Excalidraw's top-right menu row (next to Library), when that
   // row exists. Phones have no such row, so the stack falls back to the corner.
   const [presenceHost, setPresenceHost] = useState(null);
+  // the laser is a pointer mode rather than a shape, so its row button follows
+  // the active tool instead of holding a toggle of its own
+  const [laserOn, setLaserOn] = useState(false);
   // "saved" | "saving" | "error": the pill in the top-right corner tells the board's save state
   const [saveState, setSaveState] = useState({ kind: "saved", at: 0 });
   // the html element carries the theme so the page chrome and the canvas agree
@@ -361,6 +374,11 @@ export default function App() {
   const onChangeRef = useRef(null);
   const remoteRef = useRef(null);
   const remoteTimerRef = useRef(0);
+  // Remote laser trails are Excalidraw collaborators: the component already
+  // knows how to fade a trail for every collaborator whose pointer is a laser.
+  const collabRef = useRef(new Map());
+  const collabFrameRef = useRef(0);
+  const pointerSentRef = useRef(0);
   const goneRef = useRef(false);
   const presenceRef = useRef(null);
   const canvasRef = useRef(null);
@@ -567,21 +585,28 @@ export default function App() {
       };
     };
 
-    // The avatar pill shares this band on the right. On narrower screens the
-    // centred tools row would slide under it, so nudge the row clear once the
-    // pill exists (and again on resize) unless someone dragged it.
+    // The save pill and the avatars share this band on the right. The row starts
+    // narrow (the portalled buttons arrive a beat later) and grows as they land,
+    // so a row measured early slides under them: watch the row's own size, and
+    // when it no longer fits, put it back in the middle of the free space unless
+    // someone is dragging it.
     const keepClear = () => {
       if (toolsDragRef.current) return;
-      const pill = document.querySelector(".presence");
-      if (!pill) return;
+      const corner = document.querySelector(".top-actions");
+      if (!corner) return;
       const rect = el.getBoundingClientRect();
-      const limit = pill.getBoundingClientRect().left - TOOLS_MARGIN;
+      if (!rect.width) return;
+      const limit = corner.getBoundingClientRect().left - TOOLS_MARGIN;
       if (rect.right <= limit) return;
-      const next = clampPoint(limit - rect.width, rect.top);
+      const viewW = document.documentElement.clientWidth || window.innerWidth;
+      const centred = Math.round((viewW - rect.width) / 2);
+      const next = clampPoint(Math.min(centred, limit - rect.width), rect.top);
       el.style.left = `${next.x}px`;
       setToolsPos(next);
     };
-    const clearTimer = window.setTimeout(keepClear, 800);
+    const rowObserver = new ResizeObserver(keepClear);
+    rowObserver.observe(el);
+    const clearTimer = window.setTimeout(keepClear, 120);
     window.addEventListener("resize", keepClear);
 
     // Pointer capture is a nicety, not the mechanism: Safari can refuse it on a
@@ -652,6 +677,7 @@ export default function App() {
 
     return () => {
       observer.disconnect();
+      rowObserver.disconnect();
       window.clearTimeout(clearTimer);
       window.removeEventListener("resize", keepClear);
       grip.removeEventListener("pointerdown", onDown);
@@ -1021,6 +1047,8 @@ export default function App() {
       }
       setSelectedGrid((prev) => (sameGridInfo(prev, hit) ? prev : hit));
       setSelectedClass((prev) => (sameClassInfo(prev, classHit) ? prev : classHit));
+      const laserNext = appState?.activeTool?.type === "laser";
+      setLaserOn((prev) => (prev === laserNext ? prev : laserNext));
 
       // The relation panel edits one arrow at a time: show it only while exactly
       // one relation arrow is selected, so a box-select never opens it.
@@ -1128,6 +1156,54 @@ export default function App() {
   }, [flush]);
 
   /* ------------------------------------------------------------- realtime */
+
+  /** One collaborator update per frame: pointer packets arrive faster than the
+      canvas needs to re-render, and each one would otherwise set state. */
+  const flushCollaborators = useCallback(() => {
+    if (collabFrameRef.current) return;
+    collabFrameRef.current = window.requestAnimationFrame(() => {
+      collabFrameRef.current = 0;
+      apiRef.current?.updateScene({ collaborators: new Map(collabRef.current) });
+    });
+  }, []);
+
+  /** Send our laser trail to the board. Excalidraw reports scene coordinates,
+      so peers can draw it without knowing our scroll or zoom. */
+  const sendLaserPointer = useCallback(({ pointer, button }) => {
+    if (!pointer || pointer.tool !== "laser") return;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== 1) return;
+    // the release is the one packet that must never be dropped
+    if (button !== "up") {
+      const now = performance.now();
+      if (now - pointerSentRef.current < 33) return;
+      pointerSentRef.current = now;
+    }
+    ws.send(
+      JSON.stringify({
+        type: "pointer",
+        tool: pointer.tool,
+        x: pointer.x,
+        y: pointer.y,
+        button: button === "down" ? "down" : "up",
+      }),
+    );
+  }, []);
+
+  /** A peer left: its trail has to go with it, or it would linger forever. */
+  const pruneCollaborators = useCallback(
+    (peers) => {
+      const alive = new Set((peers || []).map((peer) => peer.id));
+      let changed = false;
+      for (const id of collabRef.current.keys()) {
+        if (alive.has(id)) continue;
+        collabRef.current.delete(id);
+        changed = true;
+      }
+      if (changed) flushCollaborators();
+    },
+    [flushCollaborators],
+  );
 
   /** Apply a scene that came from the other side of the websocket. */
   const applyRemote = useCallback((remote) => {
@@ -1245,7 +1321,30 @@ export default function App() {
         if (message.type === "welcome") {
           meRef.current = message.you;
         } else if (message.type === "presence") {
-          setPeers(Array.isArray(message.peers) ? message.peers : []);
+          const list = Array.isArray(message.peers) ? message.peers : [];
+          setPeers(list);
+          pruneCollaborators(list);
+        } else if (message.type === "pointer") {
+          // a peer's laser: keep only the latest point per person, the trail
+          // itself is drawn from the collaborator entry by Excalidraw
+          if (!message.from || message.from === meRef.current?.id) return;
+          const x = Number(message.x);
+          const y = Number(message.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          collabRef.current.set(message.from, {
+            // renderCursor:false keeps the avatar arrow out of the way: this is
+            // a laser, and the board already shows presence in its own pill
+            pointer: {
+              x,
+              y,
+              tool: "laser",
+              // the trail wears the same colour as the sender's name
+              laserColor: message.color || "red",
+              renderCursor: false,
+            },
+            button: message.button === "down" ? "down" : "up",
+          });
+          flushCollaborators();
         } else if (message.type === "update") {
           applyRemote(message.scene);
         } else if (message.type === "saved") {
@@ -1276,6 +1375,8 @@ export default function App() {
         if (closed) return;
         setLive("closed");
         setPeers([]);
+        collabRef.current.clear();
+        flushCollaborators();
         // whatever the socket did not confirm still has to reach the server
         if (pendingRef.current) void saveOverHttp();
         // 4001 = another page carrying this tab's session id took the slot over
@@ -1318,7 +1419,7 @@ export default function App() {
       wsRef.current = null;
       if (ws) ws.close();
     };
-  }, [phase, boardId, applyRemote, saveOverHttp]);
+  }, [phase, boardId, applyRemote, saveOverHttp, pruneCollaborators, flushCollaborators]);
 
   /* grouped cells: a double-click isolates the cell inside the group instead of
      typing, so follow it with an Enter to start editing the bound text. */
@@ -1935,6 +2036,21 @@ export default function App() {
           <>
             <button
               type="button"
+              className={`tools-laser${laserOn ? " active" : ""}`}
+              onClick={() => {
+                const api = apiRef.current;
+                if (!api) return;
+                const on = api.getAppState().activeTool?.type === "laser";
+                api.setActiveTool({ type: on ? "selection" : "laser" });
+              }}
+              aria-label="เลเซอร์พอยต์"
+              aria-pressed={laserOn}
+              title="เลเซอร์พอยต์: กดค้างแล้วลาก (K)"
+            >
+              <IconLaser />
+            </button>
+            <button
+              type="button"
               className={`tools-table${panelOpen ? " active" : ""}`}
               onClick={() => setPanelOpen((v) => !v)}
               aria-label="เปิดตัวสร้างตาราง"
@@ -1971,6 +2087,7 @@ export default function App() {
             scrollToContent: true,
           }}
           onChange={onChange}
+          onPointerUpdate={sendLaserPointer}
           excalidrawAPI={(api) => {
             apiRef.current = api;
             window.__boardsApi = api; // handy for the e2e harness

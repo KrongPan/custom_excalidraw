@@ -609,8 +609,11 @@ async function openEditor(boardId = BOARD) {
       return { count: all.length, all, vw: innerWidth };
     })()`);
     check(
-      "the board tools (table, minimap, lasso) share the slot and stay inside the row",
-      boardButtons.count === 3 && boardButtons.all.every((b) => b.inside && b.w > 20),
+      "the board tools (laser, table, minimap, lasso) share the slot and stay inside the row",
+      boardButtons.count === 4 &&
+        ["tools-laser", "tools-table", "tools-minimap", "tools-lasso"].every((name) =>
+          boardButtons.all.some((b) => b.cls.includes(name))) &&
+        boardButtons.all.every((b) => b.inside && b.w >= 33),
       JSON.stringify(boardButtons),
     );
     check(
@@ -1173,8 +1176,18 @@ async function openEditor(boardId = BOARD) {
 
     /* one board, several หมวดหมู่: it becomes a card in every section */
     await cdp.click("#q");
-    await cdp.evaluate(`document.getElementById("q").value = ""`);
-    await cdp.evaluate(`document.getElementById("q").dispatchEvent(new Event("input", { bubbles: true }))`);
+    // React keeps its own value tracker, so a bare el.value = "" is ignored and
+    // the search would keep filtering everything below (sections look ungrouped)
+    await cdp.evaluate(`(() => {
+      const input = document.getElementById("q");
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    await cdp.waitFor(`document.getElementById("q").value === "" && document.querySelectorAll(".card:not([hidden])").length > 1`, {
+      label: "search cleared",
+      timeout: 4000,
+    }).catch(() => null);
     const groupTag = `${Date.now()}`;
     const groupOne = (await api("/api/groups", {
       method: "POST",
@@ -1201,6 +1214,14 @@ async function openEditor(boardId = BOARD) {
     await cdp.waitFor(`!!document.querySelector('#group-chips .chip[data-group="${groupOne.id}"]')`, {
       label: "group chips",
     });
+    // the catalogue paints the cards from its cached list first and re-files them
+    // once /api/boards answers, so wait for the second copy instead of racing it
+    await cdp
+      .waitFor(`document.querySelectorAll('.card[data-slug="${BOARD}"]').length === 2`, {
+        label: "the board filed under both groups",
+        timeout: 6000,
+      })
+      .catch(() => null);
     const multi = await cdp.evaluate(`(() => {
       const copies = [...document.querySelectorAll('.card[data-slug="${BOARD}"]')];
       const sections = [...document.querySelectorAll(".board-section")].filter((s) =>
