@@ -244,6 +244,27 @@ function describeScene(scene) {
   };
 }
 
+// How much of the bento grid a board deserves: a busy board or a big canvas
+// gets the wide/large tile, a tall board gets the extra row. Only the bento
+// layout reads data-weight, so this never changes the card or list view.
+const WEIGHT_LARGE_ELEMENTS = 60;
+const WEIGHT_LARGE_AREA = 1500000;
+const WEIGHT_WIDE_ELEMENTS = 25;
+const WEIGHT_WIDE_AREA = 600000;
+const WEIGHT_TALL_AREA = 250000;
+const WEIGHT_TALL_RATIO = 1.6;
+
+function sceneWeight(elements, width, height) {
+  const count = Number(elements) || 0;
+  const w = Math.max(0, Math.round(Number(width) || 0));
+  const h = Math.max(0, Math.round(Number(height) || 0));
+  const area = w * h;
+  if (count >= WEIGHT_LARGE_ELEMENTS || area >= WEIGHT_LARGE_AREA) return "large";
+  if (count >= WEIGHT_WIDE_ELEMENTS || area >= WEIGHT_WIDE_AREA) return "wide";
+  if (h > w * WEIGHT_TALL_RATIO && area >= WEIGHT_TALL_AREA) return "tall";
+  return "small";
+}
+
 /* --------------------------------------------------------------- rendering */
 
 function runProcess(cmd, args) {
@@ -345,6 +366,13 @@ function renderPage(entries, generatedAt) {
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>';
   const ICON_CHEVRON =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>';
+  // three layouts for the board list: two tall cards, rows, and a bento tile set
+  const ICON_VIEW_CARD =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3.5" y="3.5" width="7" height="17" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="17" rx="1.8"/></svg>';
+  const ICON_VIEW_LIST =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="4.5" height="4.5" rx="1.2"/><path d="M10.5 6.2h10.5"/><rect x="3" y="9.8" width="4.5" height="4.5" rx="1.2"/><path d="M10.5 12h10.5"/><rect x="3" y="15.5" width="4.5" height="4.5" rx="1.2"/><path d="M10.5 17.8h10.5"/></svg>';
+  const ICON_VIEW_BENTO =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="9.5" height="9.5" rx="1.8"/><rect x="15" y="3" width="6" height="4.5" rx="1.4"/><rect x="15" y="10" width="6" height="11" rx="1.8"/><rect x="3" y="15" width="9.5" height="6" rx="1.4"/></svg>';
 
   const cards = entries
     .map((entry) => {
@@ -367,7 +395,10 @@ function renderPage(entries, generatedAt) {
         : entry.groupId
           ? [entry.groupId]
           : [];
-      return `      <article class="card" data-slug="${escapeHtml(entry.slug)}" data-group="${escapeHtml(
+      // data-weight only drives the bento spans; every other view ignores it.
+      return `      <article class="card" data-slug="${escapeHtml(entry.slug)}" data-weight="${escapeHtml(
+        entry.weight || "small",
+      )}" data-group="${escapeHtml(
         entry.groupId || "",
       )}" data-groups="${escapeHtml(groupHints.join(" "))}" data-search="${escapeHtml(
         `${entry.title} ${entry.subtitle} ${entry.slug}`.toLowerCase(),
@@ -402,6 +433,12 @@ function renderPage(entries, generatedAt) {
       </article>`;
     })
     .join("\n");
+
+  // meta.json already knows whether any board sits in a group; with none the fold
+  // button has nothing to fold, so it ships hidden and the API answer decides.
+  const hasGroupHints = entries.some(
+    (entry) => (Array.isArray(entry.groupIds) && entry.groupIds.length > 0) || entry.groupId,
+  );
 
   return `<!DOCTYPE html>
 <html lang="th">
@@ -455,6 +492,7 @@ try {
     --input-bg-strong: rgba(255, 255, 255, 0.72);
     --input-inset: inset 0 1px 0 rgba(255, 255, 255, 0.7);
     --fallback-bg: rgba(250, 251, 255, 0.96);
+    --bento-fade: rgba(250, 251, 255, 0.93);
     --line: rgba(24, 24, 39, 0.1);
     --line-strong: rgba(24, 24, 39, 0.16);
     --glass-line: rgba(255, 255, 255, 0.8);
@@ -520,6 +558,7 @@ try {
     --input-bg-strong: rgba(255, 255, 255, 0.09);
     --input-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
     --fallback-bg: rgba(20, 24, 40, 0.97);
+    --bento-fade: rgba(16, 19, 33, 0.92);
     --line: rgba(226, 231, 255, 0.12);
     --line-strong: rgba(226, 231, 255, 0.2);
     --glass-line: rgba(255, 255, 255, 0.14);
@@ -785,13 +824,201 @@ try {
   @media (hover: none) {
     .iconbtn { opacity: 1; }
   }
+  /* ------------------------------------------------------- view switch ----- */
+  .view-switch {
+    display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+    border-radius: 10px; border: 1px solid var(--chip-line); background: var(--chip-bg);
+  }
+  .view-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 24px; padding: 0; cursor: pointer;
+    border: 1px solid transparent; border-radius: 8px;
+    background: transparent; color: var(--muted);
+    transition: background .12s ease, color .12s ease, border-color .12s ease;
+  }
+  .view-btn:hover { color: var(--ink); background: var(--chip-bg-hover); }
+  .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* the active pill follows <body data-view>, which the pre-paint script sets,
+     so the switch is already correct on the very first frame */
+  body[data-view="card"] .view-btn[data-view="card"],
+  body[data-view="list"] .view-btn[data-view="list"],
+  body[data-view="bento"] .view-btn[data-view="bento"] {
+    color: var(--ink); background: var(--accent-soft); border-color: var(--accent);
+  }
+  /* -------------------------------------------------- collapsible group bar - */
+  .bar-toggle {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; padding: 0; cursor: pointer;
+    border-radius: 9px; border: 1px solid var(--chip-line);
+    background: var(--chip-bg); color: var(--ink);
+    transition: background .12s ease, border-color .12s ease, color .12s ease;
+  }
+  .bar-toggle:hover { background: var(--chip-bg-hover); border-color: var(--accent); }
+  .bar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .bar-toggle[hidden] { display: none; }
+  .bar-toggle .chev { display: inline-flex; transition: transform .18s ease; }
+  header[data-bar="folded"] .bar-toggle .chev,
+  html[data-bar="folded"] .bar-toggle .chev { transform: rotate(180deg); }
+  /* html[data-bar] is the pre-paint hook: it hides the bar before the header's
+     own script state exists, so a folded bar never flashes on load */
+  header[data-bar="folded"] #groupbar,
+  html[data-bar="folded"] #groupbar { display: none; }
+  /* still filtering by a group while the bar is folded: a dot says so */
+  .bar-toggle[data-filter="1"] { border-color: var(--accent); color: var(--accent); }
+  .bar-toggle[data-filter="1"]::after {
+    content: ""; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--panel-strong);
+  }
+  .bar-summary {
+    display: inline-flex; align-items: center; min-width: 0; max-width: 190px;
+    padding: 4px 9px; border-radius: 999px; font-size: 11.5px; color: var(--muted);
+    border: 1px solid var(--chip-line); background: var(--chip-bg);
+  }
+  .bar-summary[hidden] { display: none; }
+  .bar-summary .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* --------------------------------------------------------- list view ----- */
+  body[data-view="list"] .grid { display: flex; flex-direction: column; gap: 10px; }
+  body[data-view="list"] .card { flex-direction: row; align-items: center; border-radius: 14px; }
+  body[data-view="list"] .shot {
+    flex: 0 0 132px; width: 132px; height: 86px; aspect-ratio: auto; padding: 6px;
+    border-bottom: 0; border-right: 1px solid var(--shot-line);
+    border-radius: 13px 0 0 13px;
+  }
+  body[data-view="list"] .body {
+    flex: 1 1 auto; min-width: 0;
+    display: grid; align-items: center; row-gap: 2px; column-gap: 16px; padding: 10px 13px;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-areas:
+      "title meta pick actions"
+      "sub meta pick actions";
+  }
+  body[data-view="list"] .body h2 { grid-area: title; }
+  body[data-view="list"] .sub { grid-area: sub; }
+  body[data-view="list"] .meta { grid-area: meta; max-width: none; }
+  body[data-view="list"] .group-pick { grid-area: pick; margin-top: 0; min-width: 118px; max-width: 190px; }
+  body[data-view="list"] .actions { grid-area: actions; margin-top: 0; flex-wrap: nowrap; }
+  /* -------------------------------------------------------- bento view ----- */
+  body[data-view="bento"] .grid {
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    grid-auto-rows: 132px;
+    grid-auto-flow: dense;
+  }
+  body[data-view="bento"] .card { position: relative; overflow: visible; border-radius: 15px; }
+  body[data-view="bento"] .card .shot {
+    position: absolute; inset: 0; z-index: -1; aspect-ratio: auto; padding: 0;
+    border-bottom: 0; border-radius: 15px;
+  }
+  /* a bento tile is a picture: the preview covers the whole tile and the words
+     sit on a frosted strip at its foot, with the group pick floating in the
+     opposite corner so the strip only has to hold the name and the buttons.
+     The card's backdrop-filter makes a stacking context, so the negative z-index
+     keeps the picture under the flow without taking .body out of it — that way
+     the pick can anchor to the tile itself. */
+  body[data-view="bento"] .card .shot img {
+    width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover;
+  }
+  body[data-view="bento"] .card .body {
+    margin-top: auto; padding: 20px 10px 8px;
+    border-radius: 0 0 15px 15px;
+    display: grid; align-items: center; column-gap: 6px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    background: linear-gradient(180deg, transparent 0, var(--bento-fade) 20px, var(--bento-fade) 100%);
+  }
+  body[data-view="bento"] .card .body h2 {
+    grid-area: 1 / 1 / 2 / 2; font-size: 13px; line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  body[data-view="bento"] .card .sub,
+  body[data-view="bento"] .card .meta { display: none; }
+  body[data-view="bento"] .card[data-weight="large"] .meta {
+    display: block; grid-area: 2 / 1 / 3 / 3; margin-top: 3px; font-size: 10.5px;
+  }
+  body[data-view="bento"] .card .group-pick {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    margin: 0; min-width: 0; max-width: calc(100% - 16px);
+  }
+  body[data-view="bento"] button.card-group {
+    /* the chip floats over the picture, so it needs a solid backing of its own */
+    width: auto; max-width: 100%; padding: 3px 7px; font-size: 10.5px; border-radius: 7px;
+    background: var(--bento-fade); border-color: var(--line-strong);
+  }
+  body[data-view="bento"] .group-menu {
+    position: absolute; right: 0; left: auto; top: calc(100% + 6px); width: 172px;
+    margin-top: 0; z-index: 8; box-shadow: var(--card-hover-shadow);
+  }
+  /* the open menu hangs past the tile, so that tile has to sit above its neighbours */
+  body[data-view="bento"] .card:has(button.card-group[aria-expanded="true"]) { z-index: 9; }
+  body[data-view="bento"] .card .actions {
+    grid-area: 1 / 2 / 2 / 3; margin-top: 0; gap: 4px; flex-wrap: nowrap;
+  }
+  body[data-view="bento"] .card .actions .primary,
+  body[data-view="bento"] .card .actions .grow { display: none; }
+  body[data-view="bento"] .card .iconbtn { height: 25px; padding: 0 6px; }
+  body[data-view="bento"] .card .iconbtn span { display: none; }
+  body[data-view="bento"] .card[data-weight="large"] { grid-column: span 2; grid-row: span 2; }
+  body[data-view="bento"] .card[data-weight="wide"] { grid-column: span 2; }
+  body[data-view="bento"] .card[data-weight="tall"] { grid-row: span 2; }
+  /* the new .grid rules tie the collapse rule on specificity but come later, so
+     a collapsed section has to be re-hidden explicitly in both views */
+  body[data-view="list"] .board-section[data-collapsed="1"] .grid,
+  body[data-view="bento"] .board-section[data-collapsed="1"] .grid { display: none; }
+  body[data-view="list"] #sections.searching .board-section[data-collapsed="1"] .grid { display: flex; }
+  body[data-view="bento"] #sections.searching .board-section[data-collapsed="1"] .grid { display: grid; }
   /* narrow screens: keep the title row for title + actions, give search its own row */
   @media (max-width: 520px) {
     .top > .grow { display: none; }
     #count { order: 1; }
-    #theme-toggle { order: 2; margin-left: auto; }
-    .app-link { order: 3; }
-    input[type="search"] { order: 4; flex: 1 1 100%; width: 100%; }
+    #bar-toggle { order: 2; }
+    #view-switch { order: 3; }
+    #theme-toggle { order: 4; margin-left: auto; }
+    .bar-summary { display: none; }
+    .app-link { order: 5; }
+    input[type="search"] { order: 6; flex: 1 1 100%; width: 100%; }
+  }
+  /* list rows on a narrow screen: smaller thumbnail, text stacked next to the actions */
+  @media (max-width: 640px) {
+    /* a phone row has no room for a side column, so the text stacks under the
+       title and the actions keep the full width of the body */
+    body[data-view="list"] .shot { flex: 0 0 96px; width: 96px; height: 64px; padding: 5px; align-self: center; }
+    body[data-view="list"] .body {
+      display: flex; flex-direction: column; align-items: stretch;
+      gap: 3px; padding: 9px 11px;
+    }
+    body[data-view="list"] .meta { max-width: none; }
+    body[data-view="list"] .actions { margin-top: 6px; flex-wrap: wrap; }
+    body[data-view="list"] .group-pick { min-width: 0; max-width: 100%; margin-top: 6px; }
+  }
+  /* bento on a phone: one column, and the tile falls back to a stacked card */
+  @media (max-width: 520px) {
+    body[data-view="bento"] .grid { grid-template-columns: 1fr; grid-auto-rows: auto; grid-auto-flow: row; }
+    body[data-view="bento"] .card,
+    body[data-view="bento"] .card[data-weight="large"],
+    body[data-view="bento"] .card[data-weight="wide"],
+    body[data-view="bento"] .card[data-weight="tall"] { grid-column: auto; grid-row: auto; }
+    body[data-view="bento"] .card .shot {
+      position: static; inset: auto; z-index: auto; aspect-ratio: 16 / 10; padding: 0;
+      border-radius: 15px 15px 0 0;
+    }
+    body[data-view="bento"] .card .body {
+      display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+      margin-top: 0; padding: 12px 13px 13px; border-radius: 0 0 15px 15px; background: none;
+    }
+    /* the tile is a stacked card again, so the pick goes back into the flow */
+    body[data-view="bento"] .card .group-pick {
+      position: static; top: auto; right: auto; max-width: 100%; margin-top: 8px;
+    }
+    body[data-view="bento"] .group-menu {
+      position: static; top: auto; left: auto; right: auto; width: auto; margin-top: 5px;
+      box-shadow: var(--input-inset);
+    }
+    body[data-view="bento"] .card .body h2 { display: block; font-size: 14.5px; }
+    body[data-view="bento"] .card .sub,
+    body[data-view="bento"] .card .meta,
+    body[data-view="bento"] .card[data-weight="large"] .meta { display: block; grid-column: auto; }
+    body[data-view="bento"] .card .group-pick { grid-column: auto; }
+    body[data-view="bento"] .card .actions { grid-column: auto; }
+    body[data-view="bento"] .card .actions .primary { display: inline-flex; }
+    body[data-view="bento"] .card .actions .grow { display: block; }
   }
   @media (max-width: 560px) {
     .sect-toggle { width: 26px; height: 26px; margin-left: -5px; }
@@ -886,7 +1113,22 @@ try {
   }
 </style>
 </head>
-<body>
+<body data-view="card">
+<script>
+/* Runs before the first paint: the saved layout and a folded group bar are
+   already right on the first frame, so nothing jumps once the page settles. */
+try {
+  var savedView = localStorage.getItem("boards-view");
+  document.body.dataset.view = savedView === "list" || savedView === "bento" ? savedView : "card";
+} catch (err) {
+  document.body.dataset.view = "card";
+}
+try {
+  if (localStorage.getItem("boards-bar") === "folded") {
+    document.documentElement.setAttribute("data-bar", "folded");
+  }
+} catch (err) {}
+</script>
 <header>
   <div class="top">
     <img class="brand" src="/gallery/logo-64.png" alt="" width="30" height="30" decoding="async">
@@ -894,6 +1136,13 @@ try {
     <span class="count" id="count">${entries.length} board${entries.length === 1 ? "" : "s"}</span>
     <span class="grow"></span>
     <input type="search" id="q" placeholder="ค้นหากระดาน…" aria-label="ค้นหากระดาน" autocomplete="off" spellcheck="false">
+    <button type="button" id="bar-toggle" class="bar-toggle" aria-expanded="true" aria-controls="groupbar" title="ย่อหมวดหมู่" aria-label="ย่อหมวดหมู่"${hasGroupHints ? "" : " hidden"}><span class="chev">${ICON_CHEVRON}</span></button>
+    <span id="bar-summary" class="bar-summary" hidden aria-live="polite"><span class="txt"></span></span>
+    <div id="view-switch" class="view-switch" role="radiogroup" aria-label="รูปแบบการแสดงผล">
+      <button type="button" class="view-btn" data-view="card" role="radio" aria-checked="true" title="การ์ด" tabindex="0">${ICON_VIEW_CARD}</button>
+      <button type="button" class="view-btn" data-view="list" role="radio" aria-checked="false" title="รายการ" tabindex="-1">${ICON_VIEW_LIST}</button>
+      <button type="button" class="view-btn" data-view="bento" role="radio" aria-checked="false" title="เบนโต" tabindex="-1">${ICON_VIEW_BENTO}</button>
+    </div>
     <button class="themebtn" type="button" id="theme-toggle" aria-label="สลับเป็นโหมดมืด" title="สลับธีม"><span class="theme-glyph" aria-hidden="true">☾</span></button>
     <a class="app-link" href="/new">+ กระดานใหม่</a>
   </div>
@@ -1124,6 +1373,20 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   }
 
   /* ----------------------------------------------------------- card copies */
+  // A board that only exists in the /api/boards answer has no scene bounds here,
+  // so its bento span falls back to the element count. Same thresholds as the
+  // build (gallery/build.mjs sceneWeight), so both kinds of card agree.
+  function weightFor(elements, width, height) {
+    const count = Number(elements) || 0;
+    const w = Math.max(0, Number(width) || 0);
+    const h = Math.max(0, Number(height) || 0);
+    const area = w * h;
+    if (count >= 60 || area >= 1500000) return "large";
+    if (count >= 25 || area >= 600000) return "wide";
+    if (h > w * 1.6 && area >= 250000) return "tall";
+    return "small";
+  }
+
   function registerCard(card) {
     if (!card || !card.dataset.slug) return;
     card.hidden = false;
@@ -1445,6 +1708,8 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
       ? "ไม่พบกระดานที่ตรงกับชื่อนี้"
       : "ไม่มีกระดานในหมวดนี้ — เลือก “ทั้งหมด” หรือย้ายกระดานเข้าหมวดนี้";
     empty.hidden = shown.size !== 0;
+    // the folded bar mirrors the chip row: filter dot, or the group name itself
+    syncBarChrome();
   }
 
   function fmtSize(bytes) {
@@ -1527,6 +1792,114 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   };
   if (schemeQuery.addEventListener) schemeQuery.addEventListener("change", onSchemeChange);
 
+  /* ------------------------------------------------------------ view modes */
+  const VIEWS = ["card", "list", "bento"];
+  const VIEW_KEY = "boards-view";
+  const viewSwitch = document.getElementById("view-switch");
+  const viewBtns = viewSwitch ? [...viewSwitch.querySelectorAll(".view-btn")] : [];
+
+  function currentView() {
+    return VIEWS.includes(document.body.dataset.view) ? document.body.dataset.view : "card";
+  }
+
+  // aria-checked follows the <body> attribute the pre-paint script already set,
+  // so the switch is never briefly on the wrong item
+  function paintViewSwitch() {
+    const mode = currentView();
+    for (const btn of viewBtns) {
+      const on = btn.dataset.view === mode;
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+      btn.tabIndex = on ? 0 : -1;
+    }
+  }
+
+  function setView(mode, remember) {
+    const next = VIEWS.includes(mode) ? mode : "card";
+    document.body.dataset.view = next;
+    if (remember) {
+      try {
+        localStorage.setItem(VIEW_KEY, next);
+      } catch (err) {
+        /* private mode: still switches for this page */
+      }
+    }
+    paintViewSwitch();
+  }
+
+  if (viewSwitch) {
+    viewSwitch.addEventListener("click", (event) => {
+      const btn = event.target.closest(".view-btn");
+      if (!btn || !VIEWS.includes(btn.dataset.view)) return;
+      setView(btn.dataset.view, true);
+    });
+    // a radiogroup: the arrow keys move the choice and the focus together
+    viewSwitch.addEventListener("keydown", (event) => {
+      if (!event.target.closest(".view-btn")) return;
+      const at = VIEWS.indexOf(currentView());
+      let next = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = VIEWS[(at + 1) % VIEWS.length];
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+        next = VIEWS[(at + VIEWS.length - 1) % VIEWS.length];
+      else if (event.key === "Home") next = VIEWS[0];
+      else if (event.key === "End") next = VIEWS[VIEWS.length - 1];
+      if (!next) return;
+      event.preventDefault();
+      setView(next, true);
+      const target = viewBtns.find((btn) => btn.dataset.view === next);
+      if (target) target.focus();
+    });
+  }
+  paintViewSwitch();
+
+  /* -------------------------------------------------- collapsible group bar */
+  const BAR_KEY = "boards-bar";
+  const headerEl = document.querySelector("header");
+  const barToggle = document.getElementById("bar-toggle");
+  const barSummary = document.getElementById("bar-summary");
+  // the pre-paint script parked the saved choice on <html>, which also lets CSS
+  // hide the bar before this script runs; from here the flag is the source
+  let barFoldedState = document.documentElement.getAttribute("data-bar") === "folded";
+  // true once /api/groups has answered: only then is "no groups at all" a fact,
+  // so the button is not hidden on a guess while the request is still open
+  let groupsSettled = false;
+
+  function syncBarChrome() {
+    const folded = barFoldedState;
+    document.documentElement.setAttribute("data-bar", folded ? "folded" : "open");
+    if (headerEl) headerEl.dataset.bar = folded ? "folded" : "open";
+    if (barToggle) {
+      if (groupsSettled) barToggle.hidden = groups.length === 0;
+      barToggle.setAttribute("aria-expanded", folded ? "false" : "true");
+      barToggle.title = folded ? "ขยายหมวดหมู่" : "ย่อหมวดหมู่";
+      barToggle.setAttribute("aria-label", barToggle.title);
+      // a filter that is still on while its chips are hidden needs a hint dot
+      if (folded && activeGroup !== "all") barToggle.dataset.filter = "1";
+      else delete barToggle.dataset.filter;
+    }
+    const filtered = folded && activeGroup !== "all" ? groupById(activeGroup) : null;
+    if (barSummary) {
+      const label = barSummary.querySelector(".txt");
+      if (label) label.textContent = filtered ? "กรอง: " + filtered.name : "";
+      barSummary.hidden = !filtered;
+    }
+    groupbar.hidden = folded || groups.length === 0;
+  }
+
+  function setBar(folded, remember) {
+    barFoldedState = folded;
+    if (remember) {
+      try {
+        localStorage.setItem(BAR_KEY, folded ? "folded" : "open");
+      } catch (err) {
+        /* private mode: still folds for this page */
+      }
+    }
+    syncBarChrome();
+  }
+
+  if (barToggle) barToggle.addEventListener("click", () => setBar(!barFoldedState, true));
+  syncBarChrome();
+
   /* ---------------------------------------------------------------- groups */
   function apiJson(method, url, body) {
     const init = { method };
@@ -1564,18 +1937,23 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!data || !Array.isArray(data.groups)) {
-          groupbar.hidden = true;
+          groups = [];
+          groupsSettled = true;
+          syncBarChrome();
           return false;
         }
         groups = data.groups.map(normalizeGroup).filter(Boolean);
         if (!groupById(activeGroup)) activeGroup = "all";
-        groupbar.hidden = false;
+        groupsSettled = true;
+        syncBarChrome();
         layout();
         applyFilter();
         return true;
       })
       .catch(() => {
-        groupbar.hidden = true;
+        groups = [];
+        groupsSettled = true;
+        syncBarChrome();
         return false;
       });
   }
@@ -2153,6 +2531,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         const card = document.createElement("article");
         card.className = "card";
         card.dataset.slug = board.id;
+        card.dataset.weight = weightFor(board.elements);
         card.dataset.group = "";
         card.dataset.groups = "";
         card.dataset.search = (board.id + " " + (board.title || "")).toLowerCase();
@@ -2290,6 +2669,9 @@ async function main() {
         frames: info.frames,
         width: px?.width || info.width,
         height: px?.height || info.height,
+        // the bento span follows the scene itself, not the thumbnail bitmap:
+        // every thumb is the same size, so it would weigh them all alike
+        weight: sceneWeight(info.elements, info.width, info.height),
         size: info.size,
         sizeLabel: formatBytes(info.size),
         updated: info.updated,
