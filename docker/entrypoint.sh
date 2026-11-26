@@ -9,7 +9,9 @@
 #
 # Thumbnails are NOT rendered here: that needs the excalidraw CLI and a browser,
 # which do not belong in a runtime image. Boards without a preview show the
-# "ยังไม่มีภาพตัวอย่าง" tile until `node gallery/build.mjs` runs on the host.
+# "ยังไม่มีภาพตัวอย่าง" tile until the host renders them — either
+# `node scripts/watch-previews.mjs` (keeps them in step) or a one-off
+# `node gallery/build.mjs`.
 #
 # Both steps are best-effort: a failure is logged and the server still starts.
 # Set SKIP_MIGRATE=1 / SKIP_GALLERY=1 to opt out.

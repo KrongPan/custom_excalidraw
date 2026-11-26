@@ -39,8 +39,10 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
@@ -277,17 +279,43 @@ async function renderThumbnail(scene, thumbPath) {
     // so a missing preview is "not yet", not a failure
     return { ok: existsSync(thumbPath), cached: true, skipped: true };
   }
+  /* Render beside the final file and rename over it: a render killed halfway
+     (Ctrl-C, a page closed under the CLI) must never leave a truncated PNG or a
+     thumbnail that looks fresher than the board. The temp name lives in SITE,
+     not THUMBS, so a concurrent build's orphan sweep cannot delete it. */
+  const tmp = join(SITE, `.thumb-${process.pid}-${scene.slug}.png`);
   const result = await runProcess(CLI, [
     "render",
     scene.path,
     "--out",
-    thumbPath,
+    tmp,
     "--max-width",
     String(THUMB_MAX_WIDTH),
     "--padding",
     "28",
   ]);
+  if (!result.ok) {
+    rmSync(tmp, { force: true });
+    return { ...result, cached: false };
+  }
+  renameSync(tmp, thumbPath);
+  /* Stamp the PNG with the scene it was rendered from. If the board is saved
+     again while the browser renders it, the scene ends up newer than the stamp
+     and the next run renders it again — otherwise the picture of an older state
+     would count as fresh forever. */
+  try {
+    utimesSync(thumbPath, new Date(), new Date(Math.ceil(sceneAge)));
+  } catch {
+    /* the round-to-ms stamp is a nicety; the PNG itself is already correct */
+  }
   return { ...result, cached: false };
+}
+
+/** Write a page atomically so a reader never opens a half-written file. */
+function writeAtomic(file, data) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, file);
 }
 
 /** Small worker pool so a handful of boards renders without spawning all at once. */
@@ -1933,13 +1961,25 @@ async function main() {
     process.stderr.write(`no boards in ${SCENES} yet (expected <id>/scene.excalidraw)\n`);
   }
 
-  // Drop thumbnails/copies whose source scene no longer exists.
-  const keep = new Set(scenes.map((s) => s.slug));
-  for (const dir of [THUMBS, OUT_SCENES]) {
-    for (const file of readdirSync(dir)) {
-      const slug = basename(file, extname(file));
-      if (!keep.has(slug)) rmSync(join(dir, file), { force: true });
-    }
+  // Drop thumbnails/copies whose source scene no longer exists. Only the files
+  // this build owns are swept: `.thumb-*.png` in SITE belong to a render that
+  // may still be running (the watcher plus a container rebuild can overlap).
+  const keepPng = new Set(scenes.map((s) => `${s.slug}.png`));
+  for (const file of readdirSync(THUMBS)) {
+    if (!file.endsWith(".png") || keepPng.has(file)) continue;
+    rmSync(join(THUMBS, file), { force: true });
+  }
+  const keepScene = new Set(scenes.map((s) => `${s.slug}.excalidraw`));
+  for (const file of readdirSync(OUT_SCENES)) {
+    if (!file.endsWith(".excalidraw") || keepScene.has(file)) continue;
+    rmSync(join(OUT_SCENES, file), { force: true });
+  }
+  // A render that died before its rename leaves one of these behind; they are
+  // invisible to the page but should not pile up in the site root.
+  for (const file of readdirSync(SITE)) {
+    if (!file.startsWith(".thumb-")) continue;
+    const path = join(SITE, file);
+    if (Date.now() - statSync(path).mtimeMs > 10 * 60_000) rmSync(path, { force: true });
   }
 
   process.stdout.write(`building ${scenes.length} board(s) from ${SCENES}\n`);
@@ -1996,8 +2036,8 @@ async function main() {
     hour12: false,
   });
 
-  writeFileSync(join(SITE, "index.html"), renderPage(entries, generatedAt));
-  writeFileSync(
+  writeAtomic(join(SITE, "index.html"), renderPage(entries, generatedAt));
+  writeAtomic(
     join(SITE, "manifest.json"),
     `${JSON.stringify({ generatedAt, boards: entries.map(({ mtime, ...rest }) => rest) }, null, 2)}\n`,
   );

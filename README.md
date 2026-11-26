@@ -67,9 +67,31 @@ open http://localhost:5001
 ระหว่างใช้งาน ทุกครั้งที่ **สร้าง / บันทึก / เปลี่ยนชื่อ / ลบ** กระดาน เซิร์ฟเวอร์จะสั่งสร้าง catalog ใหม่ให้เองใน ~1.2 วินาที
 
 เหลือรันบนโฮสต์อย่างเดียว: **render รูปพรีวิว** (ในคอนเทนเนอร์ไม่มี Chrome/CLI ของ excalidraw)
+คอนเทนเนอร์เขียน `index.html` ใหม่ทุกครั้งที่บันทึก แต่ไม่แตะ PNG — ถ้าไม่มีอะไร render ให้ ภาพตัวอย่างจะค้างที่ครั้งสุดท้ายที่ build
+
+เปิด watcher ไว้ตอนทำงาน (แนะนำ — เปิดครั้งเดียวแล้วปล่อยไว้):
 
 ```bash
-node gallery/build.mjs        # PNG พรีวิวของกระดานที่ยังไม่มี; ใบที่ไม่มีพรีวิวขึ้นช่อง “ยังไม่มีภาพตัวอย่าง”
+node scripts/watch-previews.mjs     # render ครั้งแรก แล้วคอย render ใหม่เมื่อกระดานถูกบันทึก
+```
+
+มันเฝ้า `gallery/scenes/` ปล่อยให้การบันทึกนิ่ง ~2 วินาที แล้วรัน `gallery/build.mjs` ซึ่ง render เฉพาะใบที่ยังไม่มีภาพ
+หรือภาพเก่ากว่า scene — `meta.json`, `history/` และ `.groups.json` ไม่ทำให้ render ซ้ำ; หยุดด้วย Ctrl-C
+(มี `--once` สำหรับ render รอบเดียวแล้วจบ, `--no-initial` สำหรับเฝ้าอย่างเดียว)
+
+ติดตั้งให้เริ่มเองตอน login (macOS/launchd — ติดตั้งครั้งเดียว หลังจากนั้นไม่ต้องเปิด terminal):
+
+```bash
+node scripts/install-watch-previews.mjs              # ติดตั้ง + เริ่มทันที
+node scripts/install-watch-previews.mjs --uninstall   # ถอนออก
+```
+
+label `com.aixt.excalidraw.previews`, log ที่ `.cache/preview-watcher.log`
+
+ถ้าไม่อยากเปิด process ค้างไว้ เรียกเองเป็นครั้งคราวก็ได้:
+
+```bash
+node gallery/build.mjs        # PNG พรีวิวของกระดานที่ยังไม่มี/เก่า; ใบที่ไม่มีพรีวิวขึ้นช่อง “ยังไม่มีภาพตัวอย่าง”
 ```
 
 หยุด / ดูสถานะ:
@@ -116,7 +138,7 @@ gallery/
   site/                 # ผลลัพธ์ของ build.mjs (ไม่ commit)
 docker/entrypoint.sh    # ตอน start: migrate กระดานรุ่นแบน + เขียน catalog
 docker-compose.yml
-scripts/                # CLI สร้างตาราง, migrate, และชุดเทสต์
+scripts/                # CLI สร้างตาราง, migrate, watch-previews (render พรีวิวอัตโนมัติ), และชุดเทสต์
 ```
 
 ---
@@ -192,6 +214,7 @@ WebSocket: `/ws/board/<id>?name=<ชื่อผู้ใช้>&sid=<รหั�
 node scripts/test-board-storage.mjs    # โฟลเดอร์ต่อกระดาน, history, meta, DELETE
 node scripts/test-board-meta.mjs       # เปลี่ยนชื่อ/คำอธิบาย + broadcast
 node scripts/test-board-presence.mjs   # presence, sid ซ้ำ, heartbeat
+node scripts/test-preview-watcher.mjs  # พรีวิว render ครั้งแรก, แก้ scene แล้ว render ใหม่, stamp ตาม scene
 node scripts/test-grid-resize.mjs      # ตาราง: ย่อ/ขยายแถวและคอลัมน์
 node scripts/soak-table.mjs --seed 1   # property test ของตาราง (สุ่มแก้แล้วตรวจ invariant ทุกก้าว)
 ```
