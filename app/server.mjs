@@ -961,6 +961,9 @@ async function apiPut(res, req, id) {
   if (scene?.type !== "excalidraw" || !Array.isArray(scene.elements)) {
     return fail(res, 400, 'expected a scene object with type "excalidraw" and an elements array');
   }
+  // a tab left open on a board that somebody deleted must not bring it back:
+  // only POST /api/boards creates a board, a PUT writes an existing one
+  if (!(await boardExists(id))) return fail(res, 404, `board not found: ${id}`);
   await withBoardLock(id, () => saveScene(id, scene));
   scheduleGalleryRebuild();
   json(res, 200, { id, elements: scene.elements.length, savedAt: Date.now() });
@@ -1078,6 +1081,12 @@ function queuePersist(id, scene, done) {
     entry.scene = null;
     if (!payload) return;
     try {
+      // deleting a board closes its room, but a frame already in flight would
+      // otherwise recreate the folder on disk
+      if (!(await boardExists(id))) {
+        for (const w of waiters) w(false);
+        return;
+      }
       await withBoardLock(id, () => saveScene(id, payload));
       for (const w of waiters) w(true);
     } catch (error) {
