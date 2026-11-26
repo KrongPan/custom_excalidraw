@@ -315,10 +315,10 @@ async function waitForBoardCount(min, timeout = 12000) {
   return count;
 }
 
-async function openEditor() {
-  await cdp.navigate(`${BASE}/b/${BOARD}`);
+async function openEditor(boardId = BOARD) {
+  await cdp.navigate(`${BASE}/b/${boardId}`);
   await cdp.waitFor(
-    `!!document.querySelector(".presence") && !!document.querySelector(".tools-table") && !document.querySelector(".bar")`,
+    `!!window.__boardsApi && !!document.querySelector(".presence") && !!document.querySelector(".tools-table") && !document.querySelector(".bar") && !document.body.textContent.includes("กำลังโหลดกระดาน")`,
     { label: "editor ready" },
   );
 }
@@ -698,8 +698,8 @@ async function openEditor() {
     await cdp.waitFor(`/แทรกตารางแล้ว/.test(document.querySelector(".panel .note")?.textContent || "")`, {
       label: "table inserted",
     });
-    const afterTable = await waitForBoardCount(beforeTable + 5);
-    check("table insertion saves elements", afterTable >= beforeTable + 5, `${beforeTable} -> ${afterTable}`);
+    const afterTable = await waitForBoardCount(beforeTable + 6);
+    check("table insertion saves elements", afterTable >= beforeTable + 6, `${beforeTable} -> ${afterTable}`);
     await cdp.click(".panel-head .icon-btn");
     await cdp.waitFor(`!document.querySelector(".panel")?.classList.contains("open")`, {
       label: "table panel close",
@@ -1204,6 +1204,207 @@ async function openEditor() {
     check("hold-to-confirm deletes a board", deleted.status === 404, `API ${deleted.status}`);
     deleteProbe = null;
 
+    /* ------------------------------------------------ table relations */
+    const REL_BOARD = "e2e-rel-probe";
+    await deleteBoard(REL_BOARD);
+    const relCreated = await api("/api/boards", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: REL_BOARD }),
+    });
+    check(
+      "relation probe board created",
+      relCreated.status === 200 || relCreated.status === 201,
+      `API ${relCreated.status}`,
+    );
+    await openEditor(REL_BOARD);
+    await sleep(500);
+
+    await cdp.click('button[aria-label="เปิดตัวสร้างตาราง"]');
+    await cdp.waitFor(`document.querySelector(".panel")?.classList.contains("open")`, {
+      label: "relation table panel",
+    });
+    await sleep(300);
+    await cdp.click(".panel.open .panel-body > button.btn.wide");
+    await cdp.waitFor(`/แทรกตารางแล้ว/.test(document.querySelector(".panel .note")?.textContent || "")`, {
+      label: "relation table inserted",
+    });
+    await cdp.click(".panel-head .icon-btn");
+    await cdp.waitFor(`!document.querySelector(".panel")?.classList.contains("open")`, {
+      label: "relation table panel closed",
+    });
+    await sleep(900);
+
+    await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const frame = api.getSceneElements().find((el) => el.customData?.frame && !el.isDeleted);
+      api.scrollToContent(frame, { fitToContent: true, animate: false });
+      return true;
+    })()`);
+    await sleep(250);
+    const tablePoint = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const s = api.getAppState();
+      const zoom = s.zoom?.value || 1;
+      const host = document.querySelector(".canvas").getBoundingClientRect();
+      const frame = api.getSceneElements().find((el) => el.customData?.frame && !el.isDeleted);
+      return {
+        x: host.left + (frame.x + frame.width / 2 + (s.scrollX || 0)) * zoom,
+        y: host.top + (frame.y + frame.height / 2 + (s.scrollY || 0)) * zoom,
+      };
+    })()`);
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: tablePoint.x,
+      y: tablePoint.y,
+      button: "none",
+      buttons: 0,
+    });
+    await cdp.waitFor(`document.querySelector(".table-hover-arrows")?.classList.contains("visible")`, {
+      label: "hover arrows appear",
+    });
+    const hoverButtons = await cdp.evaluate(`(() => {
+      const out = {};
+      for (const b of document.querySelectorAll(".table-hover-arrow")) {
+        const r = b.getBoundingClientRect();
+        out[b.dataset.direction] = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }
+      return out;
+    })()`);
+    check("table hover shows four directions", Object.keys(hoverButtons).length === 4, JSON.stringify(Object.keys(hoverButtons)));
+
+    // The button is the user target; clicking its DOM node keeps the test
+    // independent of Excalidraw's canvas pan/zoom animation timing.
+    await cdp.evaluate(`document.querySelector('.table-hover-arrow[data-direction="right"]').click()`);
+    await cdp.waitFor(`(() => {
+      const api = window.__boardsApi;
+      const els = api.getSceneElements();
+      const grids = new Set(els.filter((el) => Number.isFinite(el.customData?.r)).map((el) => el.customData.grid));
+      return grids.size === 2 && els.some((el) => el.type === "arrow" && el.customData?.relation);
+    })()`, { label: "clone and relation created" });
+    await sleep(500);
+    const relation = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const els = api.getSceneElements();
+      const arrow = els.find((el) => el.type === "arrow" && el.customData?.relation);
+      const from = arrow.customData.relation.fromGrid;
+      const to = arrow.customData.relation.toGrid;
+      const cells = (grid) => els.filter((el) => el.customData?.grid === grid && Number.isFinite(el.customData?.r));
+      const frame = (grid) => els.find((el) => el.customData?.frame && el.customData.grid === grid);
+      const textIn = (grid) => els.filter((el) => el.type === "text" && el.containerId && cells(grid).some((c) => c.id === el.containerId)).length;
+      const fromFrame = frame(from);
+      const toFrame = frame(to);
+      return {
+        from,
+        to,
+        sourceCells: cells(from).length,
+        cloneCells: cells(to).length,
+        cloneTexts: textIn(to),
+        sourceFrame: fromFrame && { x: fromFrame.x, y: fromFrame.y, w: fromFrame.width, h: fromFrame.height },
+        cloneFrame: toFrame && { x: toFrame.x, y: toFrame.y, w: toFrame.width, h: toFrame.height },
+        heads: [arrow.startArrowhead, arrow.endArrowhead],
+        start: arrow.startBinding?.elementId,
+        end: arrow.endBinding?.elementId,
+        sourceBound: (fromFrame?.boundElements || []).some((b) => b.id === arrow.id),
+        cloneBound: (toFrame?.boundElements || []).some((b) => b.id === arrow.id),
+      };
+    })()`);
+    check(
+      "clone copies the empty structure",
+      relation.cloneCells === relation.sourceCells && relation.cloneCells === 12 && relation.cloneTexts === 0,
+      JSON.stringify(relation),
+    );
+    check(
+      "clone is placed to the right",
+      relation.cloneFrame.x >= relation.sourceFrame.x + relation.sourceFrame.w + 139,
+      JSON.stringify(relation.cloneFrame),
+    );
+    check(
+      "relation arrow binds both frames",
+      relation.start === `${relation.from}-frame` &&
+        relation.end === `${relation.to}-frame` &&
+        relation.sourceBound &&
+        relation.cloneBound,
+      JSON.stringify(relation),
+    );
+    check(
+      "new relation defaults to 1:1",
+      relation.heads[0] === "crowfoot_one" && relation.heads[1] === "crowfoot_one",
+      String(relation.heads),
+    );
+
+    await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const arrow = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      api.scrollToContent(arrow, { fitToContent: true, animate: false });
+      return true;
+    })()`);
+    await sleep(300);
+    const arrowPoint = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const s = api.getAppState();
+      const zoom = s.zoom?.value || 1;
+      const host = document.querySelector(".canvas").getBoundingClientRect();
+      const arrow = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      return {
+        x: host.left + (arrow.x + arrow.width / 2 + (s.scrollX || 0)) * zoom,
+        y: host.top + (arrow.y + arrow.height / 2 + (s.scrollY || 0)) * zoom,
+      };
+    })()`);
+    await cdp.clickPoint(arrowPoint.x, arrowPoint.y);
+    await cdp.waitFor(
+      `document.querySelector(".relation-panel") && getComputedStyle(document.querySelector(".relation-panel")).visibility === "visible"`,
+      { label: "relation panel" },
+    );
+    const relationPanel = await cdp.evaluate(`(() => ({
+      title: document.querySelector(".relation-title")?.textContent,
+      options: [...document.querySelectorAll(".relation-option")].map((b) => b.dataset.preset),
+      pressed: document.querySelector('.relation-option[data-preset="one-one"]')?.getAttribute("aria-pressed"),
+    }))()`);
+    check(
+      "clicking the relation opens four presets",
+      relationPanel.title === "ความสัมพันธ์" &&
+        relationPanel.pressed === "true" &&
+        relationPanel.options.join() === "one-one,one-many,many-one,many-many",
+      JSON.stringify(relationPanel),
+    );
+    await cdp.click('.relation-option[data-preset="many-many"]');
+    await cdp.waitFor(`(() => {
+      const a = window.__boardsApi.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      return a.startArrowhead === "crowfoot_many" && a.endArrowhead === "crowfoot_many";
+    })()`, { label: "many-to-many heads" });
+    const heads = await cdp.evaluate(`(() => {
+      const a = window.__boardsApi.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      return [a.startArrowhead, a.endArrowhead];
+    })()`);
+    check(
+      "N:N sets both crowfoot heads",
+      heads[0] === "crowfoot_many" && heads[1] === "crowfoot_many",
+      String(heads),
+    );
+    await cdp.screenshot("/tmp/e2e-relations.png");
+
+    await openEditor(REL_BOARD);
+    await cdp.waitFor(`(() => {
+      const a = window.__boardsApi?.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      return !!a && a.startArrowhead === "crowfoot_many" && a.endArrowhead === "crowfoot_many";
+    })()`, { label: "relation persisted after reload" });
+    const persisted = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const a = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      const grids = new Set(api.getSceneElements().filter((el) => Number.isFinite(el.customData?.r)).map((el) => el.customData.grid));
+      return { grids: grids.size, heads: [a?.startArrowhead, a?.endArrowhead], bound: (a?.startBinding?.elementId || "").endsWith("-frame") };
+    })()`);
+    check(
+      "relation and cardinality persist after reload",
+      persisted.grids === 2 &&
+        persisted.heads[0] === "crowfoot_many" &&
+        persisted.heads[1] === "crowfoot_many" &&
+        persisted.bound,
+      JSON.stringify(persisted),
+    );
+    await deleteBoard(REL_BOARD);
+
     // Excalidraw 0.18 still registers window.unload; Chrome 158 reports the
     // deprecation as a console error even though our app uses pagehide instead.
     const unloadNoise = /Permissions policy violation: unload is not allowed/;
@@ -1216,6 +1417,7 @@ async function openEditor() {
   } finally {
     try {
       await deleteBoard(BOARD);
+      await deleteBoard("e2e-rel-probe");
       if (deleteProbe) await deleteBoard(deleteProbe);
     } catch {
       /* ignore */

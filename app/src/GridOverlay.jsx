@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { isGridCell } from "./table.js";
 
 /* Highlights the row and column of the cell the user last clicked. It paints
    into an overlay above the Excalidraw canvases and reads geometry from the
@@ -26,9 +27,9 @@ export default function GridOverlay({ apiRef, canvasRef, activeCell }) {
       const zoom = state.zoom?.value || 1;
       const scrollX = state.scrollX || 0;
       const scrollY = state.scrollY || 0;
-      const cells = api
-        .getSceneElements()
-        .filter((el) => el.type === "rectangle" && !el.isDeleted && el.customData?.grid === grid);
+      // the transparent table frame shares customData.grid but is not a cell:
+      // counting it would stretch the row/column highlight over marker space
+      const cells = api.getSceneElements().filter((el) => isGridCell(el, grid));
 
       const box = (list) => {
         if (!list.length) return null;

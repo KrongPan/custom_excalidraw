@@ -4,6 +4,10 @@ import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import TableBuilder from "./TableBuilder.jsx";
 import GridOverlay from "./GridOverlay.jsx";
+import { buildClass, describeClass, healClass, isClassGrid, toggleClass, updateClass } from "./class.js";
+import RelationPanel from "./RelationPanel.jsx";
+import RelationWaypoints from "./RelationWaypoints.jsx";
+import TableHoverArrows from "./TableHoverArrows.jsx";
 import Minimap from "./Minimap.jsx";
 import LassoTool from "./tools/LassoTool.jsx";
 import {
@@ -11,10 +15,12 @@ import {
   buildGrid,
   healGrid,
   gridMetrics,
+  isGridCell,
   matchSizes,
   resizeGridColumn,
   resizeGridRow,
 } from "./table.js";
+import { applyCardinalityToElements, cloneAndConnect, describeRelation, syncRelations } from "./relations.js";
 
 const SAVE_DELAY = 900; // http fallback (no websocket)
 const LIVE_DELAY = 300; // websocket push while several people edit
@@ -266,6 +272,8 @@ export default function App() {
   const [fatal, setFatal] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [selectedGrid, setSelectedGrid] = useState(null);
+  const [selectedClass, setSelectedClass] = useState(null);
+  const [selectedRelation, setSelectedRelation] = useState(null);
   const [activeCell, setActiveCell] = useState(null);
   const [peers, setPeers] = useState([]);
   const [live, setLive] = useState("connecting"); // connecting | open | closed
@@ -937,9 +945,7 @@ export default function App() {
 
   /** Everything the table panel needs to know about one grid. */
   const describeGrid = useCallback((elements, gridId) => {
-    const rects = elements.filter(
-      (el) => el.type === "rectangle" && !el.isDeleted && el.customData?.grid === gridId,
-    );
+    const rects = elements.filter((el) => isGridCell(el, gridId));
     if (!rects.length) return null;
     const metrics = gridMetrics(elements, gridId);
     const first = rects[0].customData;
@@ -947,6 +953,7 @@ export default function App() {
     const cols = Math.max(...rects.map((x) => x.customData?.c ?? 0)) + 1;
     const head = elements.find((el) => !el.isDeleted && el.type === "text" && el.customData?.grid === gridId && el.customData?.title);
     return {
+      kind: "grid",
       grid: gridId,
       rows,
       cols,
@@ -975,20 +982,53 @@ export default function App() {
     a.rowHeights.join() === b.rowHeights.join() &&
     a.colWidths.join() === b.colWidths.join();
 
+  const sameClassInfo = (a, b) =>
+    !!a &&
+    !!b &&
+    a.grid === b.grid &&
+    a.title === b.title &&
+    a.width === b.width &&
+    a.collapsed === b.collapsed &&
+    a.fields.join("\n") === b.fields.join("\n") &&
+    a.methods.join("\n") === b.methods.join("\n");
+
+  /* A relation panel only needs to re-render when it moves to another arrow or
+     the cardinality changes; selection noise around it must not rebuild it. */
+  const sameRelation = (a, b) => {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.arrowId === b.arrowId && a.fromGrid === b.fromGrid && a.toGrid === b.toGrid && a.preset === b.preset;
+  };
+
   const onChange = useCallback(
     (elements, appState, files) => {
       // Which table is selected has to follow the scene from the first click, even
       // during the load burst: dropping those events left the panel saying "no
       // table" for a cell the person had just clicked. Only saving waits.
       let hit = null;
+      let classHit = null;
       const selectedIds = appState?.selectedElementIds || {};
       for (const el of elements) {
         if (selectedIds[el.id] && el.customData?.grid) {
-          hit = describeGrid(elements, el.customData.grid);
+          const gridId = el.customData.grid;
+          if (isClassGrid(elements, gridId)) {
+            classHit = describeClass(elements, gridId);
+          } else {
+            hit = describeGrid(elements, gridId);
+          }
           break;
         }
       }
       setSelectedGrid((prev) => (sameGridInfo(prev, hit) ? prev : hit));
+      setSelectedClass((prev) => (sameClassInfo(prev, classHit) ? prev : classHit));
+
+      // The relation panel edits one arrow at a time: show it only while exactly
+      // one relation arrow is selected, so a box-select never opens it.
+      const pickedArrows = elements.filter(
+        (el) => selectedIds[el.id] && el.type === "arrow" && el.customData?.relation && !el.isDeleted,
+      );
+      const relation = pickedArrows.length === 1 ? describeRelation(pickedArrows[0]) : null;
+      setSelectedRelation((prev) => (sameRelation(prev, relation) ? prev : relation));
 
       if (Date.now() < armedAtRef.current) {
         // The burst that follows a load is Excalidraw restoring what the file
@@ -1017,20 +1057,38 @@ export default function App() {
       // pass finds nothing to do, so this settles instead of looping.
       const api = apiRef.current;
       const scene = api?.getSceneElementsIncludingDeleted?.() ?? elements;
-      // not while a text editor is open (the cell is meant to grow until Escape)
-      // and not during a live drag/resize of anything on the canvas
-      if (!appState?.editingElement && !appState?.newElement && !appState?.draggingElement) {
+      // Excalidraw 0.18 keys: group drags set selectedElementsAreBeingDragged,
+      // not a `draggingElement` field. The heal pass must stay out of every
+      // live gesture, otherwise syncRelations and Excalidraw's own bound-arrow
+      // update fight each other and the connector flickers while a table moves.
+      const busy =
+        appState?.selectedElementsAreBeingDragged ||
+        appState?.resizingElement ||
+        appState?.selectionElement ||
+        appState?.newElement ||
+        appState?.editingTextElement ||
+        appState?.editingLinearElement;
+      if (!busy) {
         const grids = new Set(
           scene.filter((el) => el.customData?.grid && !el.isDeleted).map((el) => el.customData.grid),
         );
         let healed = scene;
         let touched = false;
         for (const gridId of grids) {
-          const next = healGrid(healed, gridId);
+          const next = isClassGrid(healed, gridId)
+            ? healClass(healed, gridId)
+            : healGrid(healed, gridId);
           if (next) {
             healed = next;
             touched = true;
           }
+        }
+        // frames, bindings and endpoints follow the tables after any move,
+        // resize, rebuild or undo; a repair like the grid heal above
+        const synced = syncRelations(healed);
+        if (synced) {
+          healed = synced;
+          touched = true;
         }
         if (touched) {
           window.requestAnimationFrame(() => {
@@ -1274,7 +1332,9 @@ export default function App() {
         const ids = Object.keys(state.selectedElementIds || {});
         if (ids.length !== 1) return;
         const el = api.getSceneElements().find((item) => item.id === ids[0]);
-        if (!el?.customData?.grid) return;
+        // the transparent frame also carries customData.grid, but it must never
+        // become a text container: only real cells and class lines enter edit mode
+        if (!isGridCell(el) && !el?.customData?.classLine && !el?.customData?.classTitle) return;
         const host = document.querySelector(".excalidraw") ?? document.body;
         host.dispatchEvent(
           new KeyboardEvent("keydown", {
@@ -1313,12 +1373,12 @@ export default function App() {
       const mine = all.filter((el) => el.customData?.grid === meta.grid);
       if (!mine.length) throw new Error("ไม่พบตารางที่เลือก");
 
-      const cells = mine.filter((el) => el.type === "rectangle");
+      const cells = mine.filter((el) => isGridCell(el, meta.grid));
       const originX = Math.min(...mine.map((el) => el.x));
       const originY = Math.min(...mine.map((el) => el.y));
 
       const byId = new Map(mine.map((el) => [el.id, el]));
-      const cellIds = new Set(mine.filter((el) => el.type === "rectangle").map((el) => el.id));
+      const cellIds = new Set(mine.filter((el) => isGridCell(el, meta.grid)).map((el) => el.id));
       // a cell's text is bound by containerId, not by customData: pick up both
       // shapes so older boards (whose text lost customData) migrate cleanly
       const texts = new Map();
@@ -1361,7 +1421,7 @@ export default function App() {
       // cells carry no text element until they hold something — restore the ones with text
       const restored = [];
       for (const el of placed) {
-        if (el.type !== "rectangle" || !el.customData) continue;
+        if (!isGridCell(el, meta.grid)) continue;
         const value = texts.get(`${el.customData.r}:${el.customData.c}`);
         if (!value) continue;
         const { r, c } = el.customData;
@@ -1375,12 +1435,25 @@ export default function App() {
       }
       const rebuilt = [...placed, ...restored];
 
-      const firstCell = placed.find((el) => el.type === "rectangle");
+      const firstCell = placed.find((el) => isGridCell(el, meta.grid));
+      // Rebuild in place, not at the end of the scene: the frame must stay
+      // below its cells (and the table below later elements), exactly like a
+      // freshly inserted grid.
+      const nextElements = [];
+      let rebuiltPlaced = false;
+      for (const el of all) {
+        if (el.customData?.grid === meta.grid || staleText.has(el.id)) {
+          if (!rebuiltPlaced) {
+            nextElements.push(...rebuilt);
+            rebuiltPlaced = true;
+          }
+          continue;
+        }
+        nextElements.push(el);
+      }
+      if (!rebuiltPlaced) nextElements.push(...rebuilt);
       api.updateScene({
-        elements: [
-          ...all.filter((el) => el.customData?.grid !== meta.grid && !staleText.has(el.id)),
-          ...rebuilt,
-        ],
+        elements: nextElements,
         appState: { selectedElementIds: firstCell ? { [firstCell.id]: true } : {} },
         // one rebuild = one undo step; without this Excalidraw coalesces several
         // rebuilds into one entry and an undo lands on a half-applied scene
@@ -1525,6 +1598,29 @@ export default function App() {
       const api = apiRef.current;
       if (!api) throw new Error("editor ยังไม่พร้อม");
 
+      if (spec.kind === "class") {
+        const built = buildClass(spec);
+        const current = api.getSceneElements();
+        let right = -Infinity;
+        for (const el of current) {
+          if (el.isDeleted) continue;
+          right = Math.max(right, el.x + (el.width || 0));
+        }
+        const offsetX = Number.isFinite(right) ? Math.round(right) + 120 : 0;
+        const placed = built.elements.map((el) => ({ ...el, x: el.x + offsetX }));
+        api.updateScene({
+          elements: [...current, ...placed],
+          appState: { selectedElementIds: { [built.frameId]: true } },
+        });
+        try {
+          api.scrollToContent(placed, { fitToContent: false, animate: true });
+        } catch {
+          /* scrolling is a nicety */
+        }
+        queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+        return placed.length;
+      }
+
       const { elements: fresh } = buildGrid(spec);
       const current = api.getSceneElements();
 
@@ -1549,6 +1645,89 @@ export default function App() {
     [queueSave],
   );
 
+  /** Rebuild a selected UML class from the panel. */
+  const applyClass = useCallback(
+    (meta, spec) => {
+      const api = apiRef.current;
+      if (!api) throw new Error("editor ยังไม่พร้อม");
+      if (!meta?.grid) throw new Error("คลิกเลือก UML class ก่อน");
+      const result = updateClass(api.getSceneElements(), meta.grid, {
+        ...spec,
+        kind: "class",
+      });
+      if (!result) return 0;
+      api.updateScene({
+        elements: result.elements,
+        appState: { selectedElementIds: { [result.frameId]: true } },
+        captureUpdate: "IMMEDIATELY",
+      });
+      const after = api.getSceneElements();
+      setSelectedClass(describeClass(after, meta.grid));
+      try {
+        api.scrollToContent(
+          after.filter((el) => el.customData?.grid === meta.grid),
+          { fitToContent: false, animate: true },
+        );
+      } catch {
+        /* nicety */
+      }
+      queueSave(after, api.getAppState(), api.getFiles());
+      return result.count;
+    },
+    [queueSave],
+  );
+
+  /** Clone the table under a hover handle, then link source and clone. */
+  const cloneTable = useCallback(
+    (gridId, direction) => {
+      const api = apiRef.current;
+      if (!api) return;
+      try {
+        const result = cloneAndConnect(api.getSceneElements(), gridId, direction);
+        const cloneElements = result.elements.filter((el) => el.customData?.grid === result.cloneGridId);
+        const selectedElementIds = {};
+        for (const el of cloneElements) selectedElementIds[el.id] = true;
+        api.updateScene({
+          elements: result.elements,
+          appState: { selectedElementIds },
+          captureUpdate: "IMMEDIATELY",
+        });
+        const cloneFrame = cloneElements.find((el) => el.customData?.frame);
+        if (cloneFrame) {
+          try {
+            api.scrollToContent(cloneFrame, { fitToContent: false, animate: true });
+          } catch {
+            /* scrolling is a nicety */
+          }
+        }
+        queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+      } catch (error) {
+        console.error("clone table failed", error);
+      }
+    },
+    [queueSave],
+  );
+
+  /** Persist the scene after a waypoint drag (the drag itself is live). */
+  const commitRelationRoute = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+  }, [queueSave]);
+
+  /** Change the cardinality heads of one selected relation arrow. */
+  const setRelationPreset = useCallback(
+    (arrowId, presetId) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const next = applyCardinalityToElements(api.getSceneElements(), arrowId, presetId);
+      if (!next) return;
+      api.updateScene({ elements: next, captureUpdate: "IMMEDIATELY" });
+      queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    },
+    [queueSave],
+  );
+
   /* Which cell did the user just click? The table panel uses it to aim the
      row/column size fields and the overlay highlights that row and column. */
   useEffect(() => {
@@ -1565,9 +1744,7 @@ export default function App() {
       const sceneY = (event.clientY - rect.top) / zoom - (state.scrollY || 0);
       const cell = api.getSceneElements().find(
         (el) =>
-          el.type === "rectangle" &&
-          !el.isDeleted &&
-          el.customData?.grid &&
+          isGridCell(el) &&
           sceneX >= el.x &&
           sceneX <= el.x + el.width &&
           sceneY >= el.y &&
@@ -1580,6 +1757,48 @@ export default function App() {
     host.addEventListener("pointerdown", onDown, true);
     return () => host.removeEventListener("pointerdown", onDown, true);
   }, [phase, scene]);
+
+  /* The +/- control is a scene element, so it travels with the class. Catching
+     its pointerdown before Excalidraw selects the group keeps the click a
+     toggle instead of a drag/selection. */
+  useEffect(() => {
+    if (phase !== "ready") return undefined;
+    const host = canvasRef.current;
+    if (!host) return undefined;
+    const onDown = (event) => {
+      const api = apiRef.current;
+      if (!api || event.button !== 0) return;
+      const state = api.getAppState();
+      const zoom = state.zoom?.value || 1;
+      const rect = host.getBoundingClientRect();
+      const sceneX = (event.clientX - rect.left) / zoom - (state.scrollX || 0);
+      const sceneY = (event.clientY - rect.top) / zoom - (state.scrollY || 0);
+      const hit = api
+        .getSceneElements()
+        .find(
+          (el) =>
+            !el.isDeleted &&
+            el.customData?.classToggle &&
+            sceneX >= el.x &&
+            sceneX <= el.x + el.width &&
+            sceneY >= el.y &&
+            sceneY <= el.y + el.height,
+        );
+      if (!hit) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const result = toggleClass(api.getSceneElements(), hit.customData.grid);
+      if (!result) return;
+      api.updateScene({
+        elements: result.elements,
+        appState: { selectedElementIds: { [result.frameId]: true } },
+        captureUpdate: "IMMEDIATELY",
+      });
+      queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    };
+    host.addEventListener("pointerdown", onDown, true);
+    return () => host.removeEventListener("pointerdown", onDown, true);
+  }, [phase, queueSave, scene]);
 
   /* ---------------------------------------------------------------- render */
 
@@ -1758,6 +1977,19 @@ export default function App() {
           }}
         />
         <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
+        <TableHoverArrows apiRef={apiRef} canvasRef={canvasRef} onClone={cloneTable} />
+        <RelationPanel
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          selected={selectedRelation}
+          onApply={setRelationPreset}
+        />
+        <RelationWaypoints
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          selected={selectedRelation}
+          onCommit={commitRelationRoute}
+        />
         <Minimap
               apiRef={apiRef}
               theme={theme}
@@ -1794,10 +2026,12 @@ export default function App() {
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
         onInsert={insertTable}
-        selected={selectedGrid}
-        onUpdate={(spec) => applyGrid(selectedGrid, spec)}
+        selected={selectedClass ?? selectedGrid}
+        onUpdate={(spec) =>
+          spec.kind === "class" ? applyClass(selectedClass, spec) : applyGrid(selectedGrid, spec)
+        }
         onGrow={(axis) => growGrid(selectedGrid, axis)}
-        active={activeCell}
+        active={selectedClass ? null : activeCell}
         onResizeRow={(r, h) => resizeRow(selectedGrid, r, h)}
         onResizeCol={(c, w) => resizeCol(selectedGrid, c, w)}
         onPreviewRow={(r, h) => previewResize(selectedGrid, "row", r, h)}
