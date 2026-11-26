@@ -24,6 +24,7 @@ const results = [];
 let browser;
 let cdp;
 let deleteProbe = null;
+let groupsToDrop = [];
 
 function check(name, ok, detail = "") {
   results.push({ name, ok: Boolean(ok), detail: String(detail || "") });
@@ -1170,6 +1171,102 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check("catalog search finds the renamed board", search.visible === 1 && search.slugs[0] === BOARD, JSON.stringify(search));
 
+    /* one board, several หมวดหมู่: it becomes a card in every section */
+    await cdp.click("#q");
+    await cdp.evaluate(`document.getElementById("q").value = ""`);
+    await cdp.evaluate(`document.getElementById("q").dispatchEvent(new Event("input", { bubbles: true }))`);
+    const groupTag = `${Date.now()}`;
+    const groupOne = (await api("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `e2e-a-${groupTag}`, color: "violet" }),
+    })).body.group;
+    const groupTwo = (await api("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `e2e-b-${groupTag}`, color: "teal" }),
+    })).body.group;
+    groupsToDrop.push(groupOne.id, groupTwo.id);
+    const filed = await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ groupIds: [groupOne.id, groupTwo.id] }),
+    });
+    check(
+      "a board can be filed in two groups at once",
+      filed.status === 200 && JSON.stringify(filed.body.groupIds) === JSON.stringify([groupOne.id, groupTwo.id]),
+      JSON.stringify(filed.body),
+    );
+    await cdp.navigate(`${BASE}/`);
+    await cdp.waitFor(`!!document.querySelector('#group-chips .chip[data-group="${groupOne.id}"]')`, {
+      label: "group chips",
+    });
+    const multi = await cdp.evaluate(`(() => {
+      const copies = [...document.querySelectorAll('.card[data-slug="${BOARD}"]')];
+      const sections = [...document.querySelectorAll(".board-section")].filter((s) =>
+        s.querySelector('.card[data-slug="${BOARD}"]'));
+      const trigger = copies[0]?.querySelector(".card-group");
+      return {
+        copies: copies.length,
+        sections: sections.map((s) => s.dataset.group).sort(),
+        label: trigger?.querySelector(".lbl")?.textContent.trim() || null,
+        expanded: trigger?.getAttribute("aria-expanded") || null,
+        ungrouped: Boolean(document.querySelector('.board-section[data-group="__none__"] .card[data-slug="${BOARD}"]')),
+      };
+    })()`);
+    check(
+      "the catalogue shows it under both groups and not ungrouped",
+      multi.copies === 2 &&
+        JSON.stringify(multi.sections) === JSON.stringify([groupOne.id, groupTwo.id].sort()) &&
+        multi.ungrouped === false,
+      JSON.stringify(multi),
+    );
+    check("the card says how many groups it holds", multi.label === "2 หมวด", multi.label);
+    await cdp.screenshot("/tmp/e2e-catalog-multi.png");
+
+    /* the popover edits membership: untick the second group */
+    await cdp.click(`.card[data-slug="${BOARD}"] .card-group`);
+    await cdp.waitFor(
+      `!document.querySelector('.card[data-slug="${BOARD}"] .group-menu').hidden`,
+      { label: "group menu open" },
+    );
+    const menu = await cdp.evaluate(`(() => {
+      const menu = document.querySelector('.card[data-slug="${BOARD}"] .group-menu');
+      return { boxes: [...menu.querySelectorAll('input[type=checkbox]')].map((b) => ({ id: b.value, checked: b.checked })) };
+    })()`);
+    check(
+      "the menu lists every group with the current ticks",
+      menu.boxes.some((b) => b.id === groupOne.id && b.checked) &&
+        menu.boxes.some((b) => b.id === groupTwo.id && b.checked) &&
+        menu.boxes.some((b) => !b.checked),
+      JSON.stringify(menu),
+    );
+    await cdp.evaluate(`(() => {
+      const box = document.querySelector('.card[data-slug="${BOARD}"] .group-menu input[value="${groupTwo.id}"]');
+      box.click();
+    })()`);
+    await cdp.waitFor(`document.querySelectorAll('.card[data-slug="${BOARD}"]').length === 1`, {
+      label: "one section left",
+      timeout: 8000,
+    });
+    const afterUntick = await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`);
+    check(
+      "unticking a group stores the remaining membership",
+      JSON.stringify(afterUntick.body.groupIds) === JSON.stringify([groupOne.id]),
+      JSON.stringify(afterUntick.body),
+    );
+    const leftLabel = await cdp.evaluate(`document.querySelector('.card[data-slug="${BOARD}"] .card-group .lbl').textContent.trim()`);
+    check("the card names its single remaining group", leftLabel === `e2e-a-${groupTag}`, leftLabel);
+
+    await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ groupIds: [] }),
+    });
+    await api(`/api/groups/${encodeURIComponent(groupOne.id)}`, { method: "DELETE" });
+    await api(`/api/groups/${encodeURIComponent(groupTwo.id)}`, { method: "DELETE" });
+    groupsToDrop = [];
+
     await cdp.viewport(393, 852, true);
     await cdp.navigate(`${BASE}/`);
     await cdp.waitFor(`!!document.querySelector(".card")`, { label: "mobile catalog" });
@@ -1235,6 +1332,10 @@ async function openEditor(boardId = BOARD) {
     });
     await sleep(900);
 
+    await cdp.waitFor(
+      `window.__boardsApi.getSceneElements().some((el) => el.customData?.frame && !el.isDeleted)`,
+      { label: "relation table frame committed" },
+    );
     await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
       const frame = api.getSceneElements().find((el) => el.customData?.frame && !el.isDeleted);
