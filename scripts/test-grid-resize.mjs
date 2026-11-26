@@ -14,7 +14,6 @@ import {
   buildGrid,
   gridMetrics,
   isGridCell,
-  isGridFrame,
   matchSizes,
   resizeGridColumn,
   resizeGridRow,
@@ -36,16 +35,12 @@ function check(name, fn) {
 
 const built = buildGrid({ columns: 3, rows: 4, width: 580, height: 300, color: "blue", headerRow: true });
 const page = built.elements;
-// isGridCell skips the transparent table frame (customData.frame), which is also
-// a rectangle; a plain type check would count 13 rectangles for a 3x4 table
 const cells = page.filter((el) => isGridCell(el));
-const frames = page.filter((el) => isGridFrame(el));
 const gridId = cells[0].customData.grid;
 
 check("buildGrid makes one rectangle per cell and no text yet", () => {
   assert.equal(cells.length, 12);
-  assert.equal(frames.length, 1, `frames ${frames.length}`);
-  assert.equal(frames[0].id, `${gridId}-frame`);
+  assert.equal(page.filter((el) => el.type === "rectangle").length, 12);
   assert.equal(page.filter((el) => el.type === "text").length, 0);
 });
 
@@ -154,7 +149,7 @@ check("custom column widths survive a rebuild", () => {
   const after = gridMetrics(rebuiltElements, rebuiltCell.customData.grid);
   assert.ok(Math.abs(after.cols[0].width - 260) <= 2, `column 0 is ${after.cols[0].width}`);
   assert.equal(Math.round(after.bounds.width), 580);
-  assert.equal(rebuiltElements.filter((el) => isGridFrame(el)).length, 1, "rebuilt grid has exactly one frame");
+  assert.equal(rebuiltElements.filter((el) => el.type === "rectangle").length, 12);
 });
 
 console.log(`\n${passed}/${passed + fails.length} checks passed`);

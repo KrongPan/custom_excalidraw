@@ -8,11 +8,8 @@
  * can exercise the whole geometry in node.
  */
 import {
-  buildGrid,
   bumpElement,
   ensureGridFrame,
-  gridMetrics,
-  isGridCell,
   isGridFrame,
   newGridId,
   tableBounds,
@@ -208,86 +205,8 @@ export function cloneAndConnect(elements, sourceGridId, direction) {
   const classFrame = list.find(
     (el) => isGridFrame(el, sourceGridId) && el.customData?.class === true,
   );
-  if (classFrame) return cloneClassAndConnect(list, sourceGridId, direction, classFrame);
-  // body size only: buildGrid adds the title height itself, so passing the
-  // frame bounds here would count the title twice and a 520x220 default would
-  // squash a table the user resized
-  const metrics = gridMetrics(list, sourceGridId);
-  const bounds = tableBounds(list, sourceGridId);
-  if (!metrics || !bounds) throw new Error("ตารางต้นทางยังไม่มีช่องให้โคลน");
-
-  let out = ensureGridFrame(list, sourceGridId, { create: true }) ?? list;
-  const cells = out.filter((el) => isGridCell(el, sourceGridId));
-  if (!cells.length) throw new Error("ตารางต้นทางยังไม่มีช่องให้โคลน");
-
-  const rows = Math.max(...cells.map((el) => el.customData.r | 0)) + 1;
-  const cols = Math.max(...cells.map((el) => el.customData.c | 0)) + 1;
-  const meta = cells[0].customData;
-  const titleEl = out.find(
-    (el) => el.type === "text" && !el.isDeleted && el.customData?.grid === sourceGridId && el.customData?.title,
-  );
-  const subtitleEl = out.find(
-    (el) => el.type === "text" && !el.isDeleted && el.customData?.grid === sourceGridId && el.customData?.subtitle,
-  );
-
-  const cloneGridId = newGridId();
-  const built = buildGrid({
-    columns: cols,
-    rows,
-    width: metrics.bounds.width,
-    height: metrics.bounds.height,
-    color: meta.color,
-    headerRow: meta.headerRow,
-    title: titleEl?.text ?? "",
-    subtitle: subtitleEl?.text ?? "",
-    gridId: cloneGridId,
-    idPrefix: cloneGridId,
-    rowHeights: metrics.rows.map((row) => row.height),
-    colWidths: metrics.cols.map((col) => col.width),
-  });
-
-  const cloneFrameId = `${cloneGridId}-frame`;
-  const cloneFrameTemplate = built.elements.find((el) => el.id === cloneFrameId);
-  if (!cloneFrameTemplate) throw new Error("สร้างกรอบตารางใหม่ไม่สำเร็จ");
-
-  const cloneW = cloneFrameTemplate.width;
-  const cloneH = cloneFrameTemplate.height;
-  let dx;
-  let dy;
-  if (direction === "right") {
-    dx = bounds.right + CLONE_GAP;
-    dy = bounds.centerY - cloneH / 2;
-  } else if (direction === "left") {
-    dx = bounds.left - CLONE_GAP - cloneW;
-    dy = bounds.centerY - cloneH / 2;
-  } else if (direction === "bottom") {
-    dx = bounds.centerX - cloneW / 2;
-    dy = bounds.bottom + CLONE_GAP;
-  } else {
-    dx = bounds.centerX - cloneW / 2;
-    dy = bounds.top - CLONE_GAP - cloneH;
-  }
-
-  const placedClone = built.elements.map((el) => ({ ...el, x: round(el.x + dx), y: round(el.y + dy) }));
-  const sourceFrame = out.find((el) => isGridFrame(el, sourceGridId));
-  const cloneFrame = placedClone.find((el) => el.id === cloneFrameId);
-  if (!sourceFrame || !cloneFrame) throw new Error("สร้างกรอบตารางใหม่ไม่สำเร็จ");
-
-  const arrowId = newArrowId();
-  const arrow = makeRelationArrow({
-    id: arrowId,
-    endpoints: directionEndpoints(frameBox(sourceFrame), frameBox(cloneFrame), direction),
-    fromFrame: sourceFrame,
-    toFrame: cloneFrame,
-    fromGrid: sourceGridId,
-    toGrid: cloneGridId,
-  });
-
-  const combined = [...out, ...placedClone, arrow];
-  // let the shared pass wire boundElements and re-derive the endpoints, so a
-  // fresh relation and a repaired one always look the same
-  const synced = syncRelations(combined) ?? combined;
-  return { elements: synced, selectedId: cloneFrameId, cloneGridId, arrowId };
+  if (!classFrame) throw new Error("ER relation clone supports class nodes only");
+  return cloneClassAndConnect(list, sourceGridId, direction, classFrame);
 }
 
 /** Clone a UML class node: class name + width, empty fields/methods. */
