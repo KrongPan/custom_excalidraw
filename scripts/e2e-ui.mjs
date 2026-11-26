@@ -297,7 +297,14 @@ async function api(pathname, options) {
 }
 
 async function deleteBoard(id) {
-  await api(`/api/boards/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+  // a board can still be holding a save when the suite ends, so one DELETE is
+  // best-effort: repeat until the API reports it gone (tests leave no junk)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await api(`/api/boards/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+    const probe = await api(`/api/boards/${encodeURIComponent(id)}`).catch(() => ({ status: 404 }));
+    if (probe.status === 404) return;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
 }
 
 function metaTitle(id) {
