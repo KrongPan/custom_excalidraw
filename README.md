@@ -172,18 +172,18 @@ gallery/scenes/<id>/
 | method | path | หมายเหตุ |
 |---|---|---|
 | GET | `/api/health` | `{ ok: true }` |
-| GET | `/api/boards` | `{boards:[{id,title,subtitle,bytes,updated,elements}]}` |
+| GET | `/api/boards` | `{boards:[{id,title,subtitle,groupId,groupIds,bytes,updated,elements}]}` (`groupIds` = หมวดทั้งหมดของกระดาน) |
 | POST | `/api/boards` | สร้างใหม่ body `{"name":"..."}` คืน `{id, scene}` |
 | GET | `/api/boards/:id` | scene เต็ม |
 | PUT | `/api/boards/:id` | เขียนทับ (validate `type === "excalidraw"`, `elements` เป็น array) |
 | GET | `/api/boards/:id/history` | `{id, keep, history:[{name,bytes,savedAt}]}` ใหม่สุดก่อน |
-| GET | `/api/boards/:id/meta` | `{id,title,subtitle,tags}` — `title` ว่างแปลว่าใช้ `id` |
-| PATCH | `/api/boards/:id/meta` | เปลี่ยนชื่อ/หมวด `{"title":"..."}`, `{"groupId":"grp_…"}`; `""` = ล้าง, `null` = ออกจากหมวด |
+| GET | `/api/boards/:id/meta` | `{id,title,subtitle,tags,groupId,groupIds}` — `title` ว่างแปลว่าใช้ `id`, `groupIds` เป็น array เสมอ (`[]` = ไม่มีหมวด) |
+| PATCH | `/api/boards/:id/meta` | เปลี่ยนชื่อ/หมวด — `{"title":"..."}`, `{"groupIds":["grp_a","grp_b"]}` (แทนทั้งลิสต์, `[]` = ล้าง, id ไม่มีจริง 404, เกิน 20 ตัว 400) หรือแบบเดิม `{"groupId":"grp_…"}` (แทนลิสต์ด้วยตัวเดียว, `""`/`null` = ล้าง) |
 | DELETE | `/api/boards/:id` | ลบทั้งโฟลเดอร์ + แจ้ง socket (`{type:"deleted"}`) |
-| GET | `/api/groups` | `{groups:[{id,name,color,createdAt,updatedAt,count}]}` |
+| GET | `/api/groups` | `{groups:[{id,name,color,createdAt,updatedAt,count}]}` — `count` = จำนวนกระดานที่ *รวม* หมวดนี้ (กระดานอยู่หลายหมวดนับในทุกหมวด) |
 | POST | `/api/groups` | สร้างหมวด `{"name":"...","color":"..."}` (ไม่ใส่สี = `violet`); ชื่อซ้ำ 409 |
 | PATCH | `/api/groups/:id` | เปลี่ยนชื่อ/สี |
-| DELETE | `/api/groups/:id` | ลบหมวด — กระดานในหมวดนั้นกลับเป็นไม่มีหมวด |
+| DELETE | `/api/groups/:id` | ลบหมวด — ถอดเฉพาะ id นั้นออกจากทุกกระดาน หมวดอื่นของกระดานยังอยู่; คืน `{deleted, moved}` |
 
 WebSocket: `/ws/board/<id>?name=<ชื่อผู้ใช้>&sid=<รหัสแท็บ>`
 

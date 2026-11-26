@@ -139,7 +139,7 @@ try {
   await step("GET meta falls back to the board id", async () => {
     const res = await api(`/api/boards/${id}/meta`);
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { id, title: id, subtitle: "", tags: [], groupId: null });
+    assert.deepEqual(res.body, { id, title: id, subtitle: "", tags: [], groupId: null, groupIds: [] });
   });
 
   await step("PATCH meta trims the title and persists the sidecar", async () => {
@@ -165,7 +165,7 @@ try {
     );
     const res = await patchJson(id, { title: "Renamed" });
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { id, title: "Renamed", subtitle: "คำอธิบาย", tags: ["a", "b"], groupId: null });
+    assert.deepEqual(res.body, { id, title: "Renamed", subtitle: "คำอธิบาย", tags: ["a", "b"], groupId: null, groupIds: [] });
     const saved = JSON.parse(await readFile(join(dataDir, id, "meta.json"), "utf8"));
     assert.deepEqual(saved, { title: "Renamed", subtitle: "คำอธิบาย", tags: ["a", "b"] });
   });
@@ -173,7 +173,7 @@ try {
   await step("a blank title clears the custom name (extras keep the sidecar)", async () => {
     const res = await patchJson(id, { title: "   " });
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { id, title: id, subtitle: "คำอธิบาย", tags: ["a", "b"], groupId: null });
+    assert.deepEqual(res.body, { id, title: id, subtitle: "คำอธิบาย", tags: ["a", "b"], groupId: null, groupIds: [] });
     const saved = JSON.parse(await readFile(join(dataDir, id, "meta.json"), "utf8"));
     assert.deepEqual(saved, { subtitle: "คำอธิบาย", tags: ["a", "b"] });
   });
@@ -240,7 +240,15 @@ try {
     assert.equal(res.status, 200);
     const broadcast = await received;
     socket.close();
-    assert.deepEqual(broadcast, { type: "meta", id, title: "Live rename", subtitle: "", tags: [], groupId: null });
+    assert.deepEqual(broadcast, {
+      type: "meta",
+      id,
+      title: "Live rename",
+      subtitle: "",
+      tags: [],
+      groupId: null,
+      groupIds: [],
+    });
     assert.ok(messages.includes("meta"));
   });
 

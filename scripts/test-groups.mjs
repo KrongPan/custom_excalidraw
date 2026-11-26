@@ -355,11 +355,12 @@ test("a board can live in several groups", async (t) => {
     const board = await listed(ids.one);
     assert.deepEqual(board.groupIds, []);
     assert.equal(board.groupId, null);
-    // the scene response echoes the same two fields (and stays a scene)
+    // the scene stays a pure Excalidraw document — membership rides on the list
+    // and the meta endpoint, never inside the file a client saves back
     const scene = await call(`/api/boards/${encodeURIComponent(ids.one)}`);
     assert.equal(scene.status, 200);
-    assert.deepEqual(scene.body.groupIds, []);
-    assert.equal(scene.body.groupId, null);
+    assert.equal("groupIds" in scene.body, false);
+    assert.equal("groupId" in scene.body, false);
     assert.deepEqual(scene.body.elements, []);
     assert.equal(scene.body.type, "excalidraw");
   });
@@ -377,9 +378,9 @@ test("a board can live in several groups", async (t) => {
     assert.equal(await countOf(ids.a), 1);
     assert.equal(await countOf(ids.b), 1);
 
-    // the scene and the meta endpoint carry the list too
+    // the meta endpoint carries the list too (the scene document does not)
     assert.deepEqual((await call(`/api/boards/${encodeURIComponent(ids.one)}/meta`)).body.groupIds, [ids.a, ids.b]);
-    assert.deepEqual((await call(`/api/boards/${encodeURIComponent(ids.one)}`)).body.groupIds, [ids.a, ids.b]);
+    assert.equal("groupIds" in (await call(`/api/boards/${encodeURIComponent(ids.one)}`)).body, false);
 
     // on disk both keys are written together
     const saved = await savedMeta(ids.one);

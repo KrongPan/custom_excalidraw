@@ -453,7 +453,7 @@ function metaView(id, meta, { groupIds = groupIdsOf(meta), always = false } = {}
 async function apiMetaGet(res, id) {
   if (!(await boardExists(id))) return fail(res, 404, `board not found: ${id}`);
   const meta = await readMeta(id);
-  json(res, 200, metaView(id, meta, { groupIds: groupIdsOf(meta, await liveGroupIds()) }));
+  json(res, 200, metaView(id, meta, { groupIds: groupIdsOf(meta, await liveGroupIds()), always: true }));
 }
 
 async function apiMetaPatch(res, req, id) {
@@ -569,7 +569,7 @@ async function apiMetaPatch(res, req, id) {
   const outcome = hasMembership ? await withGroupsLock(apply) : await apply();
   if (outcome?.missing !== undefined) return fail(res, 404, `group not found: ${outcome.missing}`);
 
-  const view = metaView(id, outcome.meta, { groupIds: outcome.groupIds, always: hasMembership });
+  const view = metaView(id, outcome.meta, { groupIds: outcome.groupIds, always: true });
   broadcast(id, { type: "meta", ...view });
   log("meta", id, view.title);
   scheduleGalleryRebuild();
@@ -943,23 +943,9 @@ async function apiGet(res, id) {
   } catch {
     return fail(res, 404, `board not found: ${id}`);
   }
-  // The scene response doubles as the board view: it carries the same two
-  // membership fields as the list and the meta endpoint, so a client opening a
-  // board directly needs no second request. Excalidraw ignores extra top-level
-  // keys, and the editor rebuilds its save payload instead of echoing them.
-  const meta = await readMeta(id);
-  const groupIds = groupIdsOf(meta, await liveGroupIds());
-  let scene = null;
-  try {
-    scene = JSON.parse(raw);
-  } catch {
-    /* a broken scene is still served as-is, exactly like before */
-  }
-  if (scene && typeof scene === "object" && !Array.isArray(scene)) {
-    scene.groupId = groupIds[0] || null;
-    scene.groupIds = groupIds;
-    raw = `${JSON.stringify(scene, null, 2)}\n`;
-  }
+  // A scene is served byte-for-byte: membership lives in the sidecar and rides
+  // on /api/boards and /api/boards/:id/meta, not inside the Excalidraw document
+  // (re-encoding a multi-megabyte scene on every open only costs time).
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   res.end(raw);
 }
