@@ -667,10 +667,15 @@ export function tableBounds(elements, gridId) {
   const list = elements || [];
   const cells = list.filter((el) => isGridCell(el, gridId));
   if (!cells.length) {
-    // A UML class preset has no cells; its visible frame is the node bounds
-    // that hover handles and connector bindings use.
+    // An ER class has no cells; its visible frame is the node bounds that hover
+    // handles and connector bindings use. Look at deleted frames too: undoing a
+    // delete or repairing a relation must be able to revive the same element.
     const frame = list.find(
-      (el) => isGridFrame(el, gridId) && el.customData?.class === true,
+      (el) =>
+        el.type === "rectangle" &&
+        el.customData?.grid === gridId &&
+        el.customData?.frame === true &&
+        el.customData?.class === true,
     );
     if (!frame) return null;
     return {
@@ -802,26 +807,6 @@ export function buildGrid({
     (titleText || subtitleText ? TITLE_GAP : 0);
 
   const elements = [];
-  // The frame is the first element of every grid: it is the anchor relation
-  // arrows bind to, and sitting below title/cells keeps it from swallowing
-  // clicks meant for a cell. Its width also covers a title wider than the table.
-  const frameWidth = Math.max(
-    cardW,
-    titleText ? measure(titleText, TITLE_FONT, FONT_SANS) : 0,
-    subtitleText ? measure(subtitleText, SUBTITLE_FONT, FONT_SANS) : 0,
-  );
-  const frame = {
-    ...rect(0, 0, frameWidth, titleH + cardH, {
-      id: `${gid}-frame`,
-      strokeColor: "transparent",
-      backgroundColor: "transparent",
-      strokeWidth: 1,
-      roughness: 0,
-      groupIds: [groupId],
-    }),
-    customData: { grid: gid, frame: true },
-  };
-  elements.push(frame);
   if (titleText) {
     const head = text(0, 0, titleText, TITLE_FONT, FONT_SANS, {
       roughness: 0,
@@ -868,7 +853,7 @@ export function buildGrid({
     }
   }
 
-  return { elements, width: cardW, height: titleH + cardH, columns: cols, rows: lines, frameId: frame.id };
+  return { elements, width: cardW, height: titleH + cardH, columns: cols, rows: lines };
 }
 
 /* ------------------------------------------------------------ grid geometry */
