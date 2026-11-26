@@ -360,11 +360,16 @@ function renderPage(entries, generatedAt) {
         `${entry.sizeLabel}`,
         formatDay(entry.updated),
       ].filter(Boolean);
-      // data-group is only a hint from meta.json; the server's /api/groups answer
-      // wins once it arrives (see loadGroups/syncMembership below).
+      // data-group/data-groups are only hints from meta.json; the server's
+      // /api/groups answer wins once it arrives (see loadMembership below).
+      const groupHints = Array.isArray(entry.groupIds)
+        ? entry.groupIds
+        : entry.groupId
+          ? [entry.groupId]
+          : [];
       return `      <article class="card" data-slug="${escapeHtml(entry.slug)}" data-group="${escapeHtml(
         entry.groupId || "",
-      )}" data-search="${escapeHtml(
+      )}" data-groups="${escapeHtml(groupHints.join(" "))}" data-search="${escapeHtml(
         `${entry.title} ${entry.subtitle} ${entry.slug}`.toLowerCase(),
       )}">
         <a class="shot" href="${href}" aria-label="เปิด ${escapeHtml(entry.title)}">${preview}</a>
@@ -372,12 +377,14 @@ function renderPage(entries, generatedAt) {
           <h2>${escapeHtml(entry.title)}</h2>
           ${entry.subtitle ? `<p class="sub">${escapeHtml(entry.subtitle)}</p>` : ""}
           <p class="meta" title="${escapeHtml(formatDate(entry.updated))}">${escapeHtml(bits.join(" · "))}</p>
-          <label class="group-pick" hidden>
-            <span>หมวด</span>
-            <select class="card-group" data-slug="${escapeHtml(entry.slug)}" aria-label="หมวดของ ${escapeHtml(
+          <div class="group-pick" hidden>
+            <button type="button" class="card-group" data-slug="${escapeHtml(
+              entry.slug,
+            )}" aria-haspopup="true" aria-expanded="false" aria-label="หมวดของ ${escapeHtml(
               entry.title,
-            )}"></select>
-          </label>
+            )}"><span class="lbl">ไม่มีหมวด</span><span class="chev">${ICON_CHEVRON}</span></button>
+            <div class="group-menu" hidden></div>
+          </div>
           <div class="actions">
             <a class="primary" href="${href}">เปิด</a>
             <span class="grow"></span>
@@ -583,7 +590,7 @@ try {
   }
   .count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
   .grow { flex: 1; }
-  input[type="search"], select.card-group {
+  input[type="search"], button.card-group {
     color: var(--ink); background: var(--input-bg);
     border: 1px solid var(--glass-line); outline: none;
     box-shadow: var(--input-inset);
@@ -677,15 +684,46 @@ try {
   .sect-btn:hover { color: var(--ink); border-color: var(--accent); background: var(--ghost-bg-hover); }
   .sect-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .sect-btn.danger:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-bg-hover); }
-  .group-pick { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  /* หมวดของกระดาน: a compact multi-select. The trigger keeps the old
+     .card-group class so existing selectors/CSS still find it; the menu sits in
+     the card's flow, so on a 393px screen it can never poke out sideways or be
+     clipped by the rounded card. */
+  .group-pick { position: relative; margin-top: 8px; min-width: 0; }
   .group-pick[hidden] { display: none; }
-  .group-pick > span { font-size: 11px; color: var(--muted); flex: none; }
-  select.card-group {
-    flex: 1; min-width: 0; font: inherit; font-size: 11.5px; padding: 4px 6px;
-    border-radius: 8px; border-color: var(--line-strong); cursor: pointer;
+  button.card-group {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    width: 100%; min-width: 0; font: inherit; font-size: 11.5px; padding: 4px 7px;
+    border-radius: 8px; border-color: var(--line-strong); cursor: pointer; text-align: left;
   }
-  select.card-group:hover { border-color: var(--accent); }
-  select.card-group:focus { border-color: var(--accent); box-shadow: var(--ring); }
+  button.card-group:hover { border-color: var(--accent); }
+  button.card-group:focus-visible { border-color: var(--accent); box-shadow: var(--ring); outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.card-group[aria-expanded="true"] { border-color: var(--accent); box-shadow: var(--ring); }
+  .card-group .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-group .chev { display: inline-flex; flex: none; transition: transform .14s ease; }
+  .card-group[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .group-menu {
+    display: flex; flex-direction: column; gap: 1px; margin-top: 5px; padding: 4px;
+    border: 1px solid var(--line-strong); border-radius: 9px;
+    background: var(--input-bg-strong); box-shadow: var(--input-inset);
+    max-height: 190px; overflow: auto; overscroll-behavior: contain;
+  }
+  .group-menu[hidden] { display: none; }
+  .group-menu label {
+    display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 6px;
+    font-size: 11.5px; color: var(--ink); cursor: pointer;
+  }
+  .group-menu label:hover { background: var(--accent-soft); }
+  .group-menu input[type="checkbox"] {
+    width: 13px; height: 13px; margin: 0; flex: none; accent-color: var(--accent); cursor: pointer;
+  }
+  .group-menu input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .group-menu .group-clear {
+    font: inherit; font-size: 11px; text-align: left; margin-top: 3px; padding: 5px 6px;
+    border: 1px dashed var(--line-strong); border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .group-menu .group-clear:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+  .group-menu .group-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .card {
     display: flex; flex-direction: column; overflow: hidden;
     background: linear-gradient(180deg, var(--card-a), var(--card-b));
@@ -761,7 +799,6 @@ try {
   @media (max-width: 420px) {
     .iconbtn.rename span, .iconbtn.danger span { display: none; }
     .sect-btn { padding: 3px 6px; font-size: 10.5px; }
-    .group-pick > span { display: none; }
   }
   .modal {
     position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
@@ -866,8 +903,10 @@ try {
   </div>
 </header>
 <main id="boards">
+<div id="sections">
 <div class="grid" id="grid">
 ${cards}
+</div>
 </div>
 </main>
 ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่มีกระดานในเซิร์ฟเวอร์นี้ — กด “+ กระดานใหม่” เพื่อเริ่ม</p>' : ""}
@@ -957,9 +996,17 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   // กรองด้วยชิป: "all" = ทุกหมวด, otherwise a group id
   let activeGroup = "all";
   let groups = [];
-  // board slug -> group id ("" = ไม่มีหมวดหมู่). /api/groups + /api/boards/:id/meta win
-  // over the data-group hint the build wrote into each card.
+  /* board slug -> ordered group ids it belongs to (missing/[] = ไม่มีหมวดหมู่).
+     /api/groups + /api/boards groupIds win over the data-groups hint the build
+     wrote into each card. */
   const membership = new Map();
+  /* one master card per board: every section shows a clone, because one DOM node
+     cannot stand in two places and a board may now belong to several groups.
+     data-slug stays the board identity on every copy. */
+  const prototypes = new Map();
+  /* The one open group menu, remembered across layout(): a tick rebuilds the
+     sections, and the menu must stay open under the pointer for the next tick. */
+  let openMenu = null;
 
   /* ซึ่งหมวดที่ผู้ใช้หุบไว้ — จำใน localStorage เพื่อให้เปิดหน้ามาแล้วยังหุบอยู่ */
   const COLLAPSE_KEY = "boards-collapsed";
@@ -1011,20 +1058,50 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     return [...boardsEl.querySelectorAll(".card")];
   }
 
+  function cardsFor(slug) {
+    return [...boardsEl.querySelectorAll('.card[data-slug="' + safeId(slug) + '"]')];
+  }
+
+  function cardTitle(slug) {
+    const proto = prototypes.get(slug);
+    const h2 = proto && proto.querySelector("h2");
+    return h2 ? h2.textContent : slug;
+  }
+
   function groupById(id) {
     for (const group of groups) if (group.id === id) return group;
     return null;
   }
 
+  /* a board's memberships, filtered to groups that still exist and de-duped */
+  function groupsOf(slug) {
+    const raw = membership.get(slug);
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const id of raw) {
+      if (id && groupById(id) && !out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
   function groupOf(slug) {
-    const id = membership.get(slug) || "";
-    return groupById(id) ? id : "";
+    const own = groupsOf(slug);
+    return own.length ? own[0] : "";
   }
 
   function countIn(groupId) {
     let n = 0;
-    for (const card of cards()) if (groupOf(card.dataset.slug) === groupId) n += 1;
+    for (const slug of prototypes.keys()) if (groupsOf(slug).includes(groupId)) n += 1;
     return n;
+  }
+
+  function menuLabel(ids) {
+    if (!ids.length) return "ไม่มีหมวด";
+    if (ids.length === 1) {
+      const group = groupById(ids[0]);
+      return group ? group.name : "ไม่มีหมวด";
+    }
+    return ids.length + " หมวด";
   }
 
   function dotFor(color) {
@@ -1046,87 +1123,245 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     }, 2600);
   }
 
+  /* ----------------------------------------------------------- card copies */
+  function registerCard(card) {
+    if (!card || !card.dataset.slug) return;
+    card.hidden = false;
+    prototypes.set(card.dataset.slug, card);
+  }
+
+  function cardCopy(slug, sectionKey) {
+    const proto = prototypes.get(slug);
+    if (!proto) return null;
+    const card = proto.cloneNode(true);
+    card.dataset.section = sectionKey;
+    card.hidden = false;
+    return card;
+  }
+
+  /* ------------------------------------------------------------ group menu */
+  function showMenu(card, focusValue) {
+    const pick = card.querySelector(".group-pick");
+    const menu = pick && pick.querySelector(".group-menu");
+    if (!menu || pick.hidden) return;
+    menu.hidden = false;
+    const trigger = pick.querySelector("button.card-group");
+    if (trigger) trigger.setAttribute("aria-expanded", "true");
+    openMenu = { slug: card.dataset.slug, section: card.dataset.section || "", focus: focusValue || null };
+    if (focusValue) {
+      const box = menu.querySelector('input[type="checkbox"][value="' + safeId(focusValue) + '"]');
+      if (box) {
+        try { box.focus({ preventScroll: true }); } catch (error) { box.focus(); }
+      }
+    }
+  }
+
+  function hideMenus(refocus) {
+    const state = openMenu;
+    for (const menu of boardsEl.querySelectorAll(".group-menu")) menu.hidden = true;
+    for (const trigger of boardsEl.querySelectorAll("button.card-group")) {
+      trigger.setAttribute("aria-expanded", "false");
+    }
+    openMenu = null;
+    if (refocus && state) {
+      const card = boardsEl.querySelector('.card[data-slug="' + safeId(state.slug) + '"]');
+      const trigger = card && card.querySelector("button.card-group");
+      if (trigger) trigger.focus();
+    }
+  }
+
+  function openCardMenu(card, focusValue) {
+    hideMenus(false);
+    showMenu(card, focusValue);
+  }
+
+  function restoreOpenMenu() {
+    if (!openMenu) return;
+    const state = openMenu;
+    openMenu = null;
+    let card = null;
+    if (state.section) {
+      card = boardsEl.querySelector(
+        '.board-section[data-group="' + safeId(state.section) + '"] .card[data-slug="' + safeId(state.slug) + '"]',
+      );
+    }
+    if (!card) card = boardsEl.querySelector('.card[data-slug="' + safeId(state.slug) + '"]');
+    if (!card) return;
+    showMenu(card, state.focus);
+  }
+
+  /* Every copy gets its own trigger + menu; the label reads one name, N หมวด,
+     or ไม่มีหมวด. Rebuilt whenever groups or membership change. */
+  function syncMenus() {
+    for (const pick of boardsEl.querySelectorAll(".group-pick")) {
+      const card = pick.closest(".card");
+      if (!card) continue;
+      const slug = card.dataset.slug;
+      const own = groupsOf(slug);
+      pick.hidden = groups.length === 0;
+      const trigger = pick.querySelector("button.card-group");
+      if (trigger) {
+        trigger.dataset.slug = slug;
+        trigger.setAttribute("aria-label", "หมวดของ " + cardTitle(slug));
+        trigger.setAttribute("aria-expanded", openMenu && openMenu.slug === slug ? "true" : "false");
+        const lbl = trigger.querySelector(".lbl");
+        if (lbl) lbl.textContent = menuLabel(own);
+      }
+      const menu = pick.querySelector(".group-menu");
+      if (!menu) continue;
+      const frag = document.createDocumentFragment();
+      for (const group of groups) {
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.value = group.id;
+        box.checked = own.includes(group.id);
+        box.setAttribute("aria-label", group.name);
+        label.appendChild(box);
+        label.appendChild(document.createTextNode(group.name));
+        frag.appendChild(label);
+      }
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "group-clear";
+      clear.textContent = "ล้างหมวด";
+      clear.setAttribute("aria-label", "ล้างหมวดของ " + cardTitle(slug));
+      frag.appendChild(clear);
+      menu.replaceChildren(frag);
+      menu.hidden = !(openMenu && openMenu.slug === slug);
+    }
+  }
+
+  /* One PATCH carries the whole new membership; a tick re-renders the sections
+     but keeps the menu (and the checkbox just used) under the pointer. */
+  function commitMembership(slug, nextIds, focusValue) {
+    const card = boardsEl.querySelector('.card[data-slug="' + safeId(slug) + '"]');
+    const section = card ? card.dataset.section || "" : "";
+    const boxes = card ? [...card.querySelectorAll(".group-menu input[type=checkbox]")] : [];
+    for (const box of boxes) box.disabled = true;
+    const title = cardTitle(slug);
+    apiJson("PATCH", "/api/boards/" + encodeURIComponent(slug) + "/meta", { groupIds: nextIds.slice() })
+      .then(({ ok, status }) => {
+        for (const box of boxes) box.disabled = false;
+        if (!ok) throw new Error(String(status));
+        if (nextIds.length) membership.set(slug, nextIds.slice());
+        else membership.delete(slug);
+        const names = nextIds.map((id) => (groupById(id) || {}).name).filter(Boolean);
+        toast(
+          nextIds.length
+            ? "ตั้งหมวดของ “" + title + "” เป็น " + names.join(", ")
+            : "ย้าย “" + title + "” ออกจากทุกหมวดแล้ว",
+        );
+        openMenu = { slug, section, focus: focusValue || null };
+        layout();
+        applyFilter();
+      })
+      .catch((error) => {
+        for (const box of boxes) box.disabled = false;
+        // revert to what the server actually holds
+        const own = groupsOf(slug);
+        for (const box of boxes) box.checked = own.includes(box.value);
+        const status = Number(error && error.message) || 0;
+        toast(
+          status === 404
+            ? "ไม่พบหมวดหรือกระดานนี้แล้ว — ยังไม่ได้บันทึก"
+            : "บันทึกหมวดไม่สำเร็จ (เซิร์ฟเวอร์ไม่รับค่า)",
+        );
+      });
+  }
+
   /* ---------------------------------------------------------------- layout */
   // Cards are laid out into one section per group plus a final "ไม่มีหมวดหมู่"
-  // section. Every card element is reused (moved, never rebuilt), so a select
-  // that is focused while the layout changes keeps working.
+  // section. A board with N groups gets one cloned card per section; with no
+  // groups it appears only under __none__. The master nodes stay detached.
   function layout() {
-    const all = cards();
-    const keys = groups.map((group) => group.id);
-    const buckets = new Map();
-    for (const key of keys.concat([NONE_KEY])) buckets.set(key, []);
-    for (const card of all) {
-      const key = groupOf(card.dataset.slug) || NONE_KEY;
-      (buckets.get(key) || buckets.get(NONE_KEY)).push(card);
-    }
+    const slugs = [...prototypes.keys()];
     /* no groups (backend without the API, or none created yet): keep the
        original flat grid and its id, so the page looks untouched */
     if (!groups.length) {
       const flat = document.createElement("div");
       flat.className = "grid";
       flat.id = "grid";
-      flat.append(...all);
-      boardsEl.replaceChildren(flat);
+      for (const slug of slugs) {
+        const card = cardCopy(slug, "");
+        if (card) flat.appendChild(card);
+      }
+      let box = document.getElementById("sections");
+      if (!box) {
+        box = document.createElement("div");
+        box.id = "sections";
+      }
+      boardsEl.replaceChildren(box);
+      box.replaceChildren(flat);
+      syncMenus();
       renderChips();
-      fillGroupSelects();
+      restoreOpenMenu();
       return;
     }
+    const keys = groups.map((group) => group.id).concat([NONE_KEY]);
+    const buckets = new Map();
+    for (const key of keys) buckets.set(key, []);
+    for (const slug of slugs) {
+      const own = groupsOf(slug);
+      if (!own.length) buckets.get(NONE_KEY).push(slug);
+      else for (const id of own) if (buckets.has(id)) buckets.get(id).push(slug);
+    }
     const frag = document.createDocumentFragment();
-    for (const key of keys.concat([NONE_KEY])) {
+    for (const key of keys) {
       const group = groupById(key);
       const section = document.createElement("section");
       section.className = "board-section";
       section.dataset.group = key;
       const label = group ? group.name : "ไม่มีหมวดหมู่";
       section.dataset.name = label;
-      if (groups.length) {
-        const head = document.createElement("div");
-        head.className = "sect-head";
-        head.appendChild(dotFor(group ? group.color : "slate"));
-        const name = document.createElement("h2");
-        name.className = "sect-name";
-        name.textContent = label;
-        head.appendChild(name);
-        const total = document.createElement("span");
-        total.className = "sect-count";
-        total.textContent = String(buckets.get(key).length);
-        head.appendChild(total);
-        if (group) {
-          const rename = document.createElement("button");
-          rename.className = "sect-btn";
-          rename.type = "button";
-          rename.dataset.act = "group-rename";
-          rename.dataset.group = group.id;
-          rename.textContent = "แก้ชื่อ";
-          rename.setAttribute("aria-label", "แก้ชื่อหมวด " + group.name);
-          head.appendChild(rename);
-          const del = document.createElement("button");
-          del.className = "sect-btn danger";
-          del.type = "button";
-          del.dataset.act = "group-del";
-          del.dataset.group = group.id;
-          del.textContent = "ลบ";
-          del.setAttribute("aria-label", "ลบหมวด " + group.name);
-          head.appendChild(del);
-        }
-        const toggle = document.createElement("button");
-        toggle.className = "sect-toggle";
-        toggle.type = "button";
-        toggle.dataset.act = "section-toggle";
-        toggle.dataset.group = key;
-        toggle.setAttribute("aria-expanded", "true");
-        toggle.title = "หุบหมวดนี้";
-        toggle.setAttribute("aria-label", "หุบหมวด " + label);
-        toggle.innerHTML = ICONS.chevron;
-        head.prepend(toggle);
-        section.appendChild(head);
+      const head = document.createElement("div");
+      head.className = "sect-head";
+      head.appendChild(dotFor(group ? group.color : "slate"));
+      const name = document.createElement("h2");
+      name.className = "sect-name";
+      name.textContent = label;
+      head.appendChild(name);
+      const total = document.createElement("span");
+      total.className = "sect-count";
+      total.textContent = String(buckets.get(key).length);
+      head.appendChild(total);
+      if (group) {
+        const rename = document.createElement("button");
+        rename.className = "sect-btn";
+        rename.type = "button";
+        rename.dataset.act = "group-rename";
+        rename.dataset.group = group.id;
+        rename.textContent = "แก้ชื่อ";
+        rename.setAttribute("aria-label", "แก้ชื่อหมวด " + group.name);
+        head.appendChild(rename);
+        const del = document.createElement("button");
+        del.className = "sect-btn danger";
+        del.type = "button";
+        del.dataset.act = "group-del";
+        del.dataset.group = group.id;
+        del.textContent = "ลบ";
+        del.setAttribute("aria-label", "ลบหมวด " + group.name);
+        head.appendChild(del);
       }
+      const toggle = document.createElement("button");
+      toggle.className = "sect-toggle";
+      toggle.type = "button";
+      toggle.dataset.act = "section-toggle";
+      toggle.dataset.group = key;
+      toggle.setAttribute("aria-expanded", "true");
+      toggle.title = "หุบหมวดนี้";
+      toggle.setAttribute("aria-label", "หุบหมวด " + label);
+      toggle.innerHTML = ICONS.chevron;
+      head.prepend(toggle);
+      section.appendChild(head);
       const gridBox = document.createElement("div");
       gridBox.className = "grid";
       gridBox.id = "grid-" + key;
-      const headToggle = section.querySelector(".sect-toggle");
-      if (headToggle) headToggle.setAttribute("aria-controls", gridBox.id);
-      for (const card of buckets.get(key)) gridBox.appendChild(card);
+      toggle.setAttribute("aria-controls", gridBox.id);
+      for (const slug of buckets.get(key)) {
+        const card = cardCopy(slug, key);
+        if (card) gridBox.appendChild(card);
+      }
       section.appendChild(gridBox);
       applyCollapsed(section);
       frag.appendChild(section);
@@ -1138,8 +1373,9 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     }
     boardsEl.replaceChildren(box);
     box.replaceChildren(frag);
+    syncMenus();
     renderChips();
-    fillGroupSelects();
+    restoreOpenMenu();
   }
 
   function renderChips() {
@@ -1152,7 +1388,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     all.textContent = "ทั้งหมด ";
     const total = document.createElement("span");
     total.className = "n";
-    total.textContent = String(cards().length);
+    total.textContent = String(prototypes.size);
     all.appendChild(total);
     frag.appendChild(all);
     for (const group of groups) {
@@ -1172,54 +1408,43 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     groupChips.replaceChildren(frag);
   }
 
-  function fillGroupSelects() {
-    for (const pick of boardsEl.querySelectorAll(".group-pick")) {
-      const sel = pick.querySelector("select.card-group");
-      const card = pick.closest(".card");
-      if (!sel || !card) continue;
-      pick.hidden = groups.length === 0;
-      const opts = document.createDocumentFragment();
-      const none = document.createElement("option");
-      none.value = "";
-      none.textContent = "ไม่มีหมวดหมู่";
-      opts.appendChild(none);
-      for (const group of groups) {
-        const opt = document.createElement("option");
-        opt.value = group.id;
-        opt.textContent = group.name;
-        opts.appendChild(opt);
-      }
-      sel.replaceChildren(opts);
-      sel.value = groupOf(card.dataset.slug);
-    }
-  }
-
   /* ---------------------------------------------------------------- filter */
   function applyFilter() {
-    const all = cards();
     const needle = q.value.trim().toLowerCase();
     // ค้นหาต้องกางให้เห็นของที่เจอ — ปล่อยว่างแล้วกลับไปหุบตามที่ตั้งไว้
     const sectionsBox = document.getElementById("sections");
     if (sectionsBox) sectionsBox.classList.toggle("searching", Boolean(needle));
-    let shown = 0;
-    for (const card of all) {
+    const shown = new Set();
+    for (const card of cards()) {
+      const slug = card.dataset.slug;
       const hit = !needle || (card.dataset.search || "").includes(needle);
-      const inChip = activeGroup === "all" || groupOf(card.dataset.slug) === activeGroup;
+      // a chip narrows to that group's own section: a board filed under two
+      // groups otherwise shows up once per section, which reads as a duplicate
+      const inChip = activeGroup === "all" || (card.dataset.section || "") === activeGroup;
       card.hidden = !hit || !inChip;
-      if (hit && inChip) shown += 1;
+      if (!card.hidden) shown.add(slug);
     }
     for (const section of boardsEl.querySelectorAll(".board-section")) {
-      const visible = [...section.querySelectorAll(".card")].filter((card) => !card.hidden).length;
+      // a board in two groups still counts once per section it is shown in
+      const seen = new Set();
+      let visible = 0;
+      for (const card of section.querySelectorAll(".card")) {
+        if (card.hidden || seen.has(card.dataset.slug)) continue;
+        seen.add(card.dataset.slug);
+        visible += 1;
+      }
       section.hidden = visible === 0;
       const total = section.querySelector(".sect-count");
       if (total) total.textContent = String(visible);
     }
     const scoped = Boolean(needle) || activeGroup !== "all";
-    count.textContent = scoped ? shown + " จาก " + all.length : all.length + " กระดาน";
+    count.textContent = scoped
+      ? shown.size + " จาก " + prototypes.size
+      : prototypes.size + " กระดาน";
     empty.textContent = needle
       ? "ไม่พบกระดานที่ตรงกับชื่อนี้"
       : "ไม่มีกระดานในหมวดนี้ — เลือก “ทั้งหมด” หรือย้ายกระดานเข้าหมวดนี้";
-    empty.hidden = shown !== 0;
+    empty.hidden = shown.size !== 0;
   }
 
   function fmtSize(bytes) {
@@ -1227,13 +1452,9 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     return Math.round(bytes / 1024) + " KB";
   }
 
-  function cardFor(id) {
-    return boardsEl.querySelector('[data-slug="' + safeId(id) + '"]');
-  }
-
-  // One place updates every place a board name appears on a card, so a rename
-  // in the editor, from this dialog, or from the API all converge on one name.
-  function updateCardTitle(card, id, title, subtitle) {
+  // One place updates every place a board name appears on a card copy, so a
+  // rename in the editor, from this dialog, or from the API all converge.
+  function paintCardTitle(card, id, title, subtitle) {
     if (!card) return;
     const name = title || id;
     const sub = subtitle || "";
@@ -1253,10 +1474,16 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
       del.dataset.id = id;
       del.setAttribute("aria-label", "ลบ " + name);
     }
-    const pick = card.querySelector("select.card-group");
+    const pick = card.querySelector("button.card-group");
     if (pick) pick.setAttribute("aria-label", "หมวดของ " + name);
     const download = card.querySelector(".actions a[download]");
     if (download) download.setAttribute("aria-label", "ดาวน์โหลด " + name);
+  }
+
+  function updateCardTitle(slug, title, subtitle) {
+    const proto = prototypes.get(slug);
+    if (proto) paintCardTitle(proto, slug, title, subtitle);
+    for (const card of cardsFor(slug)) paintCardTitle(card, slug, title, subtitle);
   }
 
   q.addEventListener("input", applyFilter);
@@ -1354,13 +1581,30 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   }
 
   // The catalogue is a static page, so membership comes from the API: prefer a
-  // groupId on /api/boards when the server sends one, otherwise ask each board.
+  // groupIds/groupId on /api/boards when the server sends one, otherwise ask
+  // each board's meta endpoint.
+  function idsForBoard(board) {
+    if (board && Array.isArray(board.groupIds)) {
+      return board.groupIds.filter((id) => typeof id === "string" && id);
+    }
+    if (board && typeof board.groupId === "string" && board.groupId) return [board.groupId];
+    return [];
+  }
+
   function loadMembership(boards) {
-    const list = cards().map((card) => card.dataset.slug);
-    const hasInline = boards.some((board) => board && Object.prototype.hasOwnProperty.call(board, "groupId"));
+    const list = [...prototypes.keys()];
+    const hasInline = boards.some(
+      (board) =>
+        board &&
+        (Array.isArray(board.groupIds) ||
+          Object.prototype.hasOwnProperty.call(board, "groupId")),
+    );
     if (hasInline) {
       for (const board of boards) {
-        if (board && typeof board.id === "string") membership.set(board.id, board.groupId || "");
+        if (!board || typeof board.id !== "string" || !prototypes.has(board.id)) continue;
+        const ids = idsForBoard(board);
+        if (ids.length) membership.set(board.id, ids);
+        else membership.delete(board.id);
       }
       layout();
       applyFilter();
@@ -1371,7 +1615,10 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
       fetch("/api/boards/" + encodeURIComponent(slug) + "/meta")
         .then((res) => (res.ok ? res.json() : null))
         .then((meta) => {
-          if (meta && typeof meta.groupId === "string") membership.set(slug, meta.groupId);
+          if (!meta) return;
+          const ids = idsForBoard(meta);
+          if (ids.length) membership.set(slug, ids);
+          else membership.delete(slug);
         })
         .catch(() => {}),
     );
@@ -1525,7 +1772,8 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     gdelBusy = false;
     const n = countIn(group.id);
     gdelDetail.textContent =
-      "ลบหมวด “" + group.name + "” — กระดาน " + n + " ใบจะย้ายไปอยู่ที่ “ไม่มีหมวดหมู่” และไม่ถูกลบ";
+      "ลบหมวด “" + group.name + "” — กระดาน " + n + " ใบจะออกจากหมวดนี้ " +
+      "(ใบที่ไม่มีหมวดอื่นจะไปอยู่ที่ “ไม่มีหมวดหมู่”) และไม่ถูกลบ";
     gdelConfirm.disabled = false;
     gdelConfirm.textContent = "ลบหมวด";
     gdelModal.hidden = false;
@@ -1554,8 +1802,14 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         if (!ok) throw new Error(groupErrorText(status));
         const moved = data && Number.isFinite(data.moved) ? data.moved : local;
         groups = groups.filter((item) => item.id !== group.id);
-        for (const [slug, gid] of [...membership.entries()]) {
-          if (gid === group.id) membership.delete(slug);
+        let toNone = 0;
+        for (const [slug, ids] of [...membership.entries()]) {
+          const next = (Array.isArray(ids) ? ids : []).filter((id) => id !== group.id);
+          if (next.length) membership.set(slug, next);
+          else {
+            membership.delete(slug);
+            toNone += 1;
+          }
         }
         if (activeGroup === group.id) activeGroup = "all";
         gdelBusy = false;
@@ -1567,7 +1821,11 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         gdelGroup = null;
         layout();
         applyFilter();
-        toast("ลบหมวด “" + group.name + "” แล้ว · ย้าย " + moved + " ใบไปไม่มีหมวดหมู่");
+        const bits = [];
+        if (toNone) bits.push("ย้าย " + toNone + " ใบไปไม่มีหมวดหมู่");
+        const stayed = moved - toNone;
+        if (stayed > 0) bits.push(stayed + " ใบยังอยู่ในหมวดอื่น");
+        toast("ลบหมวด “" + group.name + "” แล้ว · " + (bits.join(" · ") || "ไม่มีกระดานถูกย้าย"));
         if (trigger && trigger.isConnected) trigger.focus();
       })
       .catch((err) => {
@@ -1581,39 +1839,6 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   document.getElementById("group-del-cancel").addEventListener("click", closeGroupDelete);
   gdelModal.addEventListener("pointerdown", (event) => {
     if (event.target === gdelModal) closeGroupDelete();
-  });
-
-  /* ---------------------------------------------- move a board to a group */
-  function moveCard(sel, prev) {
-    const card = sel.closest(".card");
-    if (!card) return;
-    const slug = card.dataset.slug;
-    const next = groupById(sel.value) ? sel.value : "";
-    const target = groupById(next);
-    sel.disabled = true;
-    apiJson("PATCH", "/api/boards/" + encodeURIComponent(slug) + "/meta", { groupId: next || null })
-      .then(({ ok, status }) => {
-        sel.disabled = false;
-        if (!ok) throw new Error(String(status));
-        if (next) membership.set(slug, next);
-        else membership.delete(slug);
-        layout();
-        applyFilter();
-        toast(next ? "ย้าย “" + (card.querySelector("h2") || {}).textContent + "” ไปหมวด " + target.name : "ย้ายออกจากหมวดแล้ว");
-      })
-      .catch(() => {
-        sel.disabled = false;
-        sel.value = prev;
-        toast("ย้ายหมวดไม่สำเร็จ (เซิร์ฟเวอร์ไม่รับค่า)");
-      });
-  }
-
-  boardsEl.addEventListener("change", (event) => {
-    const sel = event.target.closest && event.target.closest("select.card-group");
-    if (!sel) return;
-    const card = sel.closest(".card");
-    const prev = card ? groupOf(card.dataset.slug) : "";
-    moveCard(sel, prev);
   });
 
   /* ----------------------------------------------------- rename a board */
@@ -1684,8 +1909,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         return res.json();
       })
       .then((meta) => {
-        const card = cardFor(id);
-        updateCardTitle(card, id, (meta && meta.title) || next, meta && meta.subtitle);
+        updateCardTitle(id, (meta && meta.title) || next, meta && meta.subtitle);
         const trigger = renameModal._trigger;
         renameBusy = false;
         renameSave.disabled = false;
@@ -1694,7 +1918,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         renameModal._trigger = null;
         renameId = null;
         if (trigger && trigger.isConnected) trigger.focus();
-        if (!card) applyFilter();
+        applyFilter();
       })
       .catch((err) => {
         renameBusy = false;
@@ -1764,8 +1988,8 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     fetch("/api/boards/" + encodeURIComponent(id), { method: "DELETE" })
       .then((res) => {
         if (!res.ok) throw new Error(String(res.status));
-        const card = cardFor(id);
-        if (card) card.remove();
+        for (const card of cardsFor(id)) card.remove();
+        prototypes.delete(id);
         membership.delete(id);
         deleting = false;
         modal.hidden = true;
@@ -1802,10 +2026,25 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     holdRaf = requestAnimationFrame(tickHold);
   }
 
-  // one delegated handler for the whole catalogue: cards are moved between
+  // one delegated handler for the whole catalogue: cards are cloned between
   // sections, so the listener lives on the wrapper that never gets replaced
   boardsEl.addEventListener("click", (event) => {
     const target = event.target;
+    const openTrigger = target.closest && target.closest("button.card-group");
+    if (openTrigger) {
+      const card = openTrigger.closest(".card");
+      if (!card) return;
+      const menu = card.querySelector(".group-menu");
+      if (menu && !menu.hidden) hideMenus(false);
+      else openCardMenu(card, null);
+      return;
+    }
+    const clear = target.closest && target.closest(".group-clear");
+    if (clear) {
+      const card = clear.closest(".card");
+      if (card) commitMembership(card.dataset.slug, [], null);
+      return;
+    }
     const sect = target.closest && target.closest("[data-act]");
     if (sect && sect.dataset.act === "section-toggle") {
       event.preventDefault();
@@ -1836,6 +2075,26 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (id) openDelete(id);
   });
 
+  // ticking/unticking any group sends the whole membership in one PATCH
+  boardsEl.addEventListener("change", (event) => {
+    const box = event.target;
+    if (!box || box.type !== "checkbox" || !box.closest(".group-menu")) return;
+    const card = box.closest(".card");
+    if (!card) return;
+    const ids = [];
+    for (const input of card.querySelectorAll(".group-menu input[type=checkbox]")) {
+      if (input.checked) ids.push(input.value);
+    }
+    commitMembership(card.dataset.slug, ids, box.value);
+  });
+
+  // an outside click closes the menu; a click inside it (another tick) does not
+  document.addEventListener("pointerdown", (event) => {
+    if (!openMenu) return;
+    if (event.target.closest && event.target.closest(".group-pick")) return;
+    hideMenus(false);
+  });
+
   groupNew.addEventListener("click", () => openGroupModal(null, groupNew));
 
   document.getElementById("del-cancel").addEventListener("click", closeDelete);
@@ -1844,7 +2103,8 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (!groupModal.hidden) closeGroupModal();
+    if (openMenu) hideMenus(true);
+    else if (!groupModal.hidden) closeGroupModal();
     else if (!gdelModal.hidden) closeGroupDelete();
     else if (!renameModal.hidden) closeRename();
     else if (!modal.hidden) closeDelete();
@@ -1870,22 +2130,22 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
       // The page is a snapshot: a board deleted after the last build must not
       // stay clickable here until someone rebuilds the catalog.
       let removed = 0;
-      for (const card of cards()) {
-        if (alive.has(card.dataset.slug)) continue;
-        card.remove();
-        membership.delete(card.dataset.slug);
+      for (const slug of [...prototypes.keys()]) {
+        if (alive.has(slug)) continue;
+        prototypes.delete(slug);
+        membership.delete(slug);
         removed += 1;
       }
       // Renames in the editor only write the sidecar, so the static card keeps
       // the name it was built with. Refresh it here instead of keeping two
       // names for the same board until someone rebuilds the catalogue.
       const byId = new Map(boards.map((board) => [board.id, board]));
-      for (const card of cards()) {
-        const board = byId.get(card.dataset.slug);
+      for (const slug of [...prototypes.keys()]) {
+        const board = byId.get(slug);
         if (!board) continue;
-        updateCardTitle(card, board.id, board.title || board.id, board.subtitle || "");
+        updateCardTitle(slug, board.title || board.id, board.subtitle || "");
       }
-      const known = new Set(cards().map((card) => card.dataset.slug));
+      const known = new Set(prototypes.keys());
       let added = 0;
       for (const board of boards) {
         if (known.has(board.id)) continue;
@@ -1893,13 +2153,15 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         const card = document.createElement("article");
         card.className = "card";
         card.dataset.slug = board.id;
-        card.dataset.group = typeof board.groupId === "string" ? board.groupId : "";
+        card.dataset.group = "";
+        card.dataset.groups = "";
         card.dataset.search = (board.id + " " + (board.title || "")).toLowerCase();
         card.innerHTML =
           '<a class="shot" href="' + href + '"><span class="placeholder">บันทึกบนเซิร์ฟเวอร์</span></a>' +
           '<div class="body"><h2></h2><p class="meta"></p>' +
-          '<label class="group-pick" hidden><span>หมวด</span>' +
-          '<select class="card-group" aria-label="หมวดของกระดาน"></select></label>' +
+          '<div class="group-pick" hidden><button type="button" class="card-group" aria-haspopup="true" aria-expanded="false">' +
+          '<span class="lbl">ไม่มีหมวด</span><span class="chev">' + ICONS.chevron + '</span></button>' +
+          '<div class="group-menu" hidden></div></div>' +
           '<div class="actions">' +
           '<a class="primary" href="' + href + '">เปิด</a><span class="grow"></span>' +
           '<button class="iconbtn rename" type="button" aria-label="แก้ชื่อกระดาน" title="แก้ชื่อกระดาน">' +
@@ -1909,8 +2171,6 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
           ICONS.trash + '<span>ลบ</span></button></div></div>';
         card.querySelector(".rename").dataset.id = board.id;
         card.querySelector(".del").dataset.id = board.id;
-        updateCardTitle(card, board.id, board.title || board.id, board.subtitle || "");
-        card.querySelector("h2").textContent = board.title || board.id;
         card.querySelector(".meta").textContent =
           (board.elements ?? "?") + " elements · " + fmtSize(board.bytes) + " · " +
           new Date(board.updated).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
@@ -1918,9 +2178,8 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
           day: "numeric", month: "short", year: "numeric",
         });
         card.querySelector("a.iconbtn").href = "/scenes/" + encodeURIComponent(board.id) + ".excalidraw";
-        card.querySelector(".del").setAttribute("aria-label", "ลบ " + (board.title || board.id));
-        // any grid works here: layout() re-buckets every card by membership
-        (boardsEl.querySelector("#sections") || boardsEl).appendChild(card);
+        paintCardTitle(card, board.id, board.title || board.id, board.subtitle || "");
+        registerCard(card);
         added += 1;
       }
       if (added || removed) {
@@ -1933,11 +2192,15 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
 
   // start from the group hints the builder wrote, then let the API correct them
   for (const card of cards()) {
-    if (card.dataset.group) membership.set(card.dataset.slug, card.dataset.group);
+    registerCard(card);
+    const hints = (card.dataset.groups || "").split(/\s+/).filter(Boolean);
+    if (hints.length) membership.set(card.dataset.slug, hints);
+    else if (card.dataset.group) membership.set(card.dataset.slug, [card.dataset.group]);
   }
   layout();
   applyFilter();
   loadGroups();
+
 </script>
 </body>
 </html>
@@ -2009,9 +2272,20 @@ async function main() {
         title: scene.meta.title || humanize(scene.slug),
         subtitle: scene.meta.subtitle || "",
         tags: scene.meta.tags || [],
-        // meta.json may remember the catalogue group; the API is authoritative,
-        // this only avoids a flash of "ไม่มีหมวดหมู่" on first paint
-        groupId: typeof scene.meta.groupId === "string" ? scene.meta.groupId : "",
+        // meta.json may remember the catalogue group(s); the API is
+        // authoritative, this only avoids a flash of "ไม่มีหมวดหมู่" on first paint
+        groupId: Array.isArray(scene.meta.groupIds)
+          ? typeof scene.meta.groupIds[0] === "string"
+            ? scene.meta.groupIds[0]
+            : ""
+          : typeof scene.meta.groupId === "string"
+            ? scene.meta.groupId
+            : "",
+        groupIds: Array.isArray(scene.meta.groupIds)
+          ? scene.meta.groupIds.filter((id) => typeof id === "string" && id)
+          : typeof scene.meta.groupId === "string" && scene.meta.groupId
+            ? [scene.meta.groupId]
+            : [],
         elements: info.elements,
         frames: info.frames,
         width: px?.width || info.width,
