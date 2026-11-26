@@ -367,12 +367,16 @@ function compact(el) {
 }
 
 function liveCells(elements, gridId) {
+  // the table frame is a rectangle with the grid's customData too; requiring a
+  // numeric row/column slot keeps it out of every cell count
   return (elements || []).filter(
     (el) =>
       el.type === "rectangle" &&
       !el.isDeleted &&
       el.customData?.grid &&
-      (gridId == null || el.customData.grid === gridId),
+      (gridId == null || el.customData.grid === gridId) &&
+      Number.isFinite(el.customData?.r) &&
+      Number.isFinite(el.customData?.c),
   );
 }
 
@@ -992,7 +996,8 @@ class Page {
     await this.cdp.evaluate(`(() => {
       const api = window.__boardsApi;
       const cells = api.getSceneElements().filter(
-        (el) => el.type === "rectangle" && !el.isDeleted && el.customData?.grid === ${JSON.stringify(gridId)},
+        (el) => el.type === "rectangle" && !el.isDeleted && el.customData?.grid === ${JSON.stringify(gridId)} &&
+          Number.isFinite(el.customData?.r) && Number.isFinite(el.customData?.c),
       );
       const target = ${
         r == null
@@ -1988,7 +1993,9 @@ async function probeUndoAB(page) {
     await page.cdp.evaluate(`(() => {
       const api = ${api};
       const keep = api.getSceneElements().filter((el) => !(el.customData && el.customData.probe));
-      const tpl = keep.find((el) => el.type === "rectangle");
+      const tpl = keep.find(
+        (el) => el.type === "rectangle" && Number.isFinite(el.customData?.r) && Number.isFinite(el.customData?.c),
+      );
       const make = (name, x) => ({
         ...tpl,
         id: "ab-" + name + "-" + Math.random().toString(36).slice(2, 6),

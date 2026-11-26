@@ -59,17 +59,42 @@ export default function TableBuilder({
   const [color, setColor] = useState("blue");
   const [headerRow, setHeaderRow] = useState(true);
   const [note, setNote] = useState(null);
+  const [preset, setPreset] = useState("table");
+  const [classTitle, setClassTitle] = useState("Classname");
+  const [classFields, setClassFields] = useState("+ field: type\n+ field: type\n+ field: type");
+  const [classMethods, setClassMethods] = useState("+ method(type): type");
+  const [classWidth, setClassWidth] = useState(320);
 
   // when a cell of an existing grid is selected, mirror it into the form: the
   // update button sends every field, so a stale heading would wipe the real one
   useEffect(() => {
     if (!open || !selected) return;
+    if (selected.kind === "class") {
+      setPreset("class");
+      setClassTitle(selected.title ?? "Classname");
+      setClassFields((selected.fields ?? []).join("\n"));
+      setClassMethods((selected.methods ?? []).join("\n"));
+      setClassWidth(selected.width ?? 320);
+      return;
+    }
+    setPreset("table");
     setColumns(selected.cols);
     setRows(selected.rows);
     if (selected.width) setWidth(selected.width);
     if (selected.height) setHeight(selected.height);
     setTitle(selected.title ?? "");
-  }, [open, selected?.grid, selected?.cols, selected?.rows, selected?.width, selected?.height, selected?.title]);
+  }, [
+    open,
+    selected?.grid,
+    selected?.kind,
+    selected?.cols,
+    selected?.rows,
+    selected?.width,
+    selected?.height,
+    selected?.title,
+    selected?.fields?.join("\n"),
+    selected?.methods?.join("\n"),
+  ]);
 
   const cellW = Math.max(1, Math.round(width / Math.max(1, columns)));
   const cellH = Math.max(1, Math.round(height / Math.max(1, rows)));
@@ -168,8 +193,21 @@ export default function TableBuilder({
     setColDraft(colSize ?? cellW);
   };
 
+  const classSpec = () => ({
+    kind: "class",
+    title: String(classTitle).trim() || "Classname",
+    fields: classFields.split(/\r?\n/),
+    methods: classMethods.split(/\r?\n/),
+    width: clamp(classWidth, [180, 900], 320),
+  });
+
   const insert = () => {
     try {
+      if (preset === "class") {
+        const count = onInsert(classSpec());
+        setNote({ ok: true, text: `แทรก UML class แล้ว · ${count} elements` });
+        return;
+      }
       const count = onInsert({
         title: String(title).trim() || undefined,
         color,
@@ -207,6 +245,31 @@ export default function TableBuilder({
       </div>
 
       <div className="panel-body">
+        <div className="preset-tabs" role="tablist" aria-label="ชนิด element">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={preset === "table"}
+            className={preset === "table" ? "active" : ""}
+            disabled={!!selected && selected.kind !== "table"}
+            onClick={() => setPreset("table")}
+          >
+            ตาราง
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={preset === "class"}
+            className={preset === "class" ? "active" : ""}
+            disabled={!!selected && selected.kind !== "class"}
+            onClick={() => setPreset("class")}
+          >
+            UML class
+          </button>
+        </div>
+
+        {preset === "table" ? (
+          <>
         <label>
           หัวเรื่อง (ไม่บังคับ)
           <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="inventory.lot" />
@@ -414,6 +477,73 @@ export default function TableBuilder({
         <button type="button" className={`btn wide${selected ? "" : " primary"}`} onClick={insert}>
           แทรกตารางใหม่
         </button>
+          </>
+        ) : (
+          <>
+            <label>
+              ชื่อคลาส
+              <input
+                value={classTitle}
+                onChange={(e) => setClassTitle(e.target.value)}
+                placeholder="Classname"
+              />
+            </label>
+
+            <label>
+              Fields (หนึ่งบรรทัดต่อ field)
+              <textarea
+                rows={5}
+                value={classFields}
+                onChange={(e) => setClassFields(e.target.value)}
+                placeholder={"+ field: type"}
+              />
+            </label>
+
+            <label>
+              Methods (หนึ่งบรรทัดต่อ method)
+              <textarea
+                rows={4}
+                value={classMethods}
+                onChange={(e) => setClassMethods(e.target.value)}
+                placeholder={"+ method(type): type"}
+              />
+            </label>
+
+            <div className="row">
+              <NumberField
+                label="ความกว้าง (px)"
+                value={classWidth}
+                limits={[180, 900]}
+                fallback={320}
+                step={10}
+                onChange={setClassWidth}
+              />
+            </div>
+
+            <p className="hint">
+              วางต่อท้ายด้านขวาของกระดาน · คลิกบรรทัดในกล่องเพื่อแก้ทีละ field/method · ปุ่ม −
+              ย่อเหลือหัวคลาส
+            </p>
+
+            {selected?.kind === "class" && (
+              <button
+                type="button"
+                className="btn primary wide"
+                onClick={() => run(() => onUpdate(classSpec()), "อัปเดต UML class แล้ว")}
+              >
+                อัปเดต class ที่เลือก
+              </button>
+            )}
+
+            <button
+              type="button"
+              className={`btn wide${selected?.kind === "class" ? "" : " primary"}`}
+              onClick={insert}
+            >
+              แทรก UML class
+            </button>
+          </>
+        )}
 
         {note && <p className={note.ok ? "note ok" : "note bad"}>{note.text}</p>}
       </div>

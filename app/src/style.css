@@ -719,6 +719,39 @@ body {
   color: var(--ink);
 }
 
+.preset-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--chip-soft);
+}
+
+.preset-tabs button {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.preset-tabs button.active {
+  background: var(--frost-hover);
+  color: var(--ink);
+  box-shadow: var(--ring);
+}
+
+.preset-tabs button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .panel-body {
   padding: 14px;
   overflow-y: auto;
@@ -1149,5 +1182,191 @@ code {
   }
   .minimap-zoom {
     font-size: 11px;
+  }
+}
+
+/* ------------------------------------------------- table relation overlays */
+
+.table-hover-arrows {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.table-hover-arrows.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.table-hover-arrow {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: var(--frost);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  box-shadow: var(--float-shadow);
+  color: var(--ink);
+  cursor: pointer;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.table-hover-arrows.visible .table-hover-arrow {
+  pointer-events: auto;
+}
+
+.table-hover-arrow:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.table-hover-arrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.relation-panel {
+  position: absolute;
+  z-index: 9;
+  width: 248px;
+  box-sizing: border-box;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-line);
+  background: var(--panel);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+.relation-title {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.relation-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.relation-option {
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--chip);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.relation-option:hover {
+  background: var(--frost-hover);
+}
+
+.relation-option[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.relation-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.relation-waypoints {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.relation-waypoint,
+.relation-waypoint-add {
+  position: absolute;
+  padding: 0;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.relation-waypoint {
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border: 2px solid var(--avatar-edge);
+  box-shadow: 0 1px 4px rgba(20, 20, 40, 0.28);
+}
+
+.relation-waypoint:hover {
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
+.relation-waypoint:active,
+.relation-waypoint-add:active {
+  cursor: grabbing;
+}
+
+.relation-waypoint-add {
+  width: 9px;
+  height: 9px;
+  background: var(--canvas-bg);
+  border: 1.5px solid var(--accent);
+  opacity: 0.86;
+}
+
+.relation-waypoint-add:hover {
+  background: var(--accent);
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1.15);
+}
+
+.relation-waypoint:focus-visible,
+.relation-waypoint-add:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+  .relation-panel {
+    width: min(248px, calc(100vw - 16px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .table-hover-arrows,
+  .table-hover-arrow,
+  .relation-option,
+  .relation-waypoint,
+  .relation-waypoint-add {
+    transition: none;
   }
 }

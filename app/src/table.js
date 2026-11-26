@@ -619,6 +619,150 @@ export function matchSizes(parts, count) {
   return [...list, ...Array.from({ length: count - list.length }, () => avg)];
 }
 
+/* -------------------------------------------------------- grid cell / frame */
+
+/**
+ * True only for a live cell of a grid. The transparent table frame shares the
+ * grid's customData but carries no row/column slot, so geometry, resize and
+ * selection code must never count it as a cell.
+ */
+export function isGridCell(el, gridId) {
+  if (!el || el.type !== "rectangle" || el.isDeleted) return false;
+  const cd = el.customData;
+  if (!cd || !cd.grid) return false;
+  if (gridId != null && cd.grid !== gridId) return false;
+  return Number.isFinite(cd.r) && Number.isFinite(cd.c);
+}
+
+/** True only for a live table frame — the invisible rectangle arrows bind to. */
+export function isGridFrame(el, gridId) {
+  if (!el || el.type !== "rectangle" || el.isDeleted) return false;
+  const cd = el.customData;
+  if (!cd || cd.frame !== true) return false;
+  return gridId == null || cd.grid === gridId;
+}
+
+/** A fresh grid id, shaped like the ones buildGrid mints on its own. */
+export function newGridId() {
+  return nextId("grid");
+}
+
+/** Copy of `el` with `patch` applied and its version bumped (change detection). */
+export function bumpElement(el, patch) {
+  return {
+    ...el,
+    ...patch,
+    version: (el.version || 0) + 1,
+    versionNonce: randInt(2 ** 31),
+    updated: Date.now(),
+  };
+}
+
+/**
+ * Visual bounds of one table: every live cell plus its title/subtitle texts.
+ * Frames are ignored — otherwise a stale frame would feed its own size back in.
+ * Returns null when the grid has no live cell.
+ */
+export function tableBounds(elements, gridId) {
+  const list = elements || [];
+  const cells = list.filter((el) => isGridCell(el, gridId));
+  if (!cells.length) {
+    // A UML class preset has no cells; its visible frame is the node bounds
+    // that hover handles and connector bindings use.
+    const frame = list.find(
+      (el) => isGridFrame(el, gridId) && el.customData?.class === true,
+    );
+    if (!frame) return null;
+    return {
+      left: round(frame.x),
+      top: round(frame.y),
+      right: round(frame.x + frame.width),
+      bottom: round(frame.y + frame.height),
+      width: round(frame.width),
+      height: round(frame.height),
+      centerX: round(frame.x + frame.width / 2),
+      centerY: round(frame.y + frame.height / 2),
+    };
+  }
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const el of cells) {
+    left = Math.min(left, el.x);
+    top = Math.min(top, el.y);
+    right = Math.max(right, el.x + el.width);
+    bottom = Math.max(bottom, el.y + el.height);
+  }
+  for (const el of list) {
+    if (el.type !== "text" || el.isDeleted) continue;
+    const cd = el.customData;
+    if (!cd || cd.grid !== gridId || (!cd.title && !cd.subtitle)) continue;
+    left = Math.min(left, el.x);
+    top = Math.min(top, el.y);
+    right = Math.max(right, el.x + el.width);
+    bottom = Math.max(bottom, el.y + el.height);
+  }
+  return {
+    left: round(left),
+    top: round(top),
+    right: round(right),
+    bottom: round(bottom),
+    width: round(right - left),
+    height: round(bottom - top),
+    centerX: round((left + right) / 2),
+    centerY: round((top + bottom) / 2),
+  };
+}
+
+/**
+ * Keep one table's frame on its bounds. Returns a new element array, or null when
+ * nothing changed. `create` inserts the frame before the grid's first element so
+ * it stays behind the cells; without it a missing frame is left alone (old boards
+ * are migrated lazily, when a relation needs them, not on load).
+ */
+export function ensureGridFrame(elements, gridId, { create = false } = {}) {
+  const list = elements || [];
+  const bounds = tableBounds(list, gridId);
+  if (!bounds) return null;
+
+  // look at deleted elements too: the heal pass sees the scene including
+  // tombstones, and a deleted frame must be reused under its own id instead of
+  // being duplicated when its cells are still alive
+  const existing = list.find(
+    (el) => el.type === "rectangle" && el.customData?.frame === true && el.customData?.grid === gridId,
+  );
+  if (existing) {
+    const patch = {};
+    if (existing.isDeleted) patch.isDeleted = false;
+    if (Math.abs(existing.x - bounds.left) > 0.5) patch.x = bounds.left;
+    if (Math.abs(existing.y - bounds.top) > 0.5) patch.y = bounds.top;
+    if (Math.abs(existing.width - bounds.width) > 0.5) patch.width = bounds.width;
+    if (Math.abs(existing.height - bounds.height) > 0.5) patch.height = bounds.height;
+    if (!Object.keys(patch).length) return null;
+    return list.map((el) => (el === existing ? bumpElement(existing, patch) : el));
+  }
+
+  if (!create) return null;
+
+  const frame = {
+    ...base("rectangle", bounds.left, bounds.top, bounds.width, bounds.height, {
+      id: `${gridId}-frame`,
+      strokeColor: "transparent",
+      backgroundColor: "transparent",
+      strokeWidth: 1,
+      roughness: 0,
+      groupIds: [`g${gridId}`],
+    }),
+    updated: Date.now(),
+    customData: { grid: gridId, frame: true },
+  };
+  const at = list.findIndex((el) => el.customData?.grid === gridId);
+  const out = list.slice();
+  out.splice(at < 0 ? list.length : at, 0, frame);
+  return out;
+}
+
 export function buildGrid({
   columns = 3,
   rows = 4,
@@ -658,6 +802,26 @@ export function buildGrid({
     (titleText || subtitleText ? TITLE_GAP : 0);
 
   const elements = [];
+  // The frame is the first element of every grid: it is the anchor relation
+  // arrows bind to, and sitting below title/cells keeps it from swallowing
+  // clicks meant for a cell. Its width also covers a title wider than the table.
+  const frameWidth = Math.max(
+    cardW,
+    titleText ? measure(titleText, TITLE_FONT, FONT_SANS) : 0,
+    subtitleText ? measure(subtitleText, SUBTITLE_FONT, FONT_SANS) : 0,
+  );
+  const frame = {
+    ...rect(0, 0, frameWidth, titleH + cardH, {
+      id: `${gid}-frame`,
+      strokeColor: "transparent",
+      backgroundColor: "transparent",
+      strokeWidth: 1,
+      roughness: 0,
+      groupIds: [groupId],
+    }),
+    customData: { grid: gid, frame: true },
+  };
+  elements.push(frame);
   if (titleText) {
     const head = text(0, 0, titleText, TITLE_FONT, FONT_SANS, {
       roughness: 0,
@@ -704,7 +868,7 @@ export function buildGrid({
     }
   }
 
-  return { elements, width: cardW, height: titleH + cardH, columns: cols, rows: lines };
+  return { elements, width: cardW, height: titleH + cardH, columns: cols, rows: lines, frameId: frame.id };
 }
 
 /* ------------------------------------------------------------ grid geometry */
@@ -806,7 +970,7 @@ export function snapGridTracks(elements, gridId) {
 
   let changed = false;
   const out = (elements || []).map((el) => {
-    if (el.type !== "rectangle" || el.isDeleted || el.customData?.grid !== gridId) return el;
+    if (!isGridCell(el, gridId)) return el;
     const { r, c } = el.customData;
     const geometry = { x: colLeft.get(c), y: rowTop.get(r), width: colWidth.get(c), height: rowHeight.get(r) };
     if (
@@ -868,14 +1032,16 @@ export function fitCellTexts(elements, gridId) {
  */
 export function healGrid(elements, gridId) {
   const snapped = snapGridTracks(elements, gridId) ?? elements;
-  return fitCellTexts(snapped, gridId) ?? (snapped === elements ? null : snapped);
+  const fitted = fitCellTexts(snapped, gridId) ?? snapped;
+  // an existing frame follows the new bounds; a missing one is not created here
+  // (old boards migrate lazily, when a relation needs their frame)
+  const framed = ensureGridFrame(fitted, gridId, { create: false }) ?? fitted;
+  return framed === elements ? null : framed;
 }
 
-/** Rectangle cells of one grid, deleted ones excluded. */
+/** Rectangle cells of one grid, deleted ones excluded; the frame is not a cell. */
 function gridCells(elements, gridId) {
-  return (elements || []).filter(
-    (el) => el.type === "rectangle" && !el.isDeleted && el.customData?.grid === gridId,
-  );
+  return (elements || []).filter((el) => isGridCell(el, gridId));
 }
 
 /**
@@ -1039,3 +1205,4 @@ export function resizeGridColumn(elements, gridId, c, width, { rewrap = true } =
 }
 
 export { PALETTE };
+export { rect as makeRect, line as makeLine, text as makeText, measure as measureText };
