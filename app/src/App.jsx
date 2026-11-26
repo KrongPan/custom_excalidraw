@@ -9,7 +9,8 @@ import RelationPanel from "./RelationPanel.jsx";
 import RelationWaypoints from "./RelationWaypoints.jsx";
 import TableHoverArrows from "./TableHoverArrows.jsx";
 import Minimap from "./Minimap.jsx";
-import LassoTool from "./tools/LassoTool.jsx";
+import LassoTool, { IconLasso } from "./tools/LassoTool.jsx";
+import ToolMenu from "./ToolMenu.jsx";
 import {
   attachCellText,
   buildGrid,
@@ -281,6 +282,8 @@ export default function App() {
   const [scene, setScene] = useState(null);
   const [fatal, setFatal] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [lassoArmed, setLassoArmed] = useState(false);
   const [selectedGrid, setSelectedGrid] = useState(null);
   const [selectedClass, setSelectedClass] = useState(null);
   const [selectedRelation, setSelectedRelation] = useState(null);
@@ -659,6 +662,7 @@ export default function App() {
       event.preventDefault();
       event.stopPropagation();
       setToolsCollapsed(true);
+      setToolsMenuOpen(false);
     };
     grip.addEventListener("pointerdown", onDown);
     grip.addEventListener("dblclick", resetToolsPosition);
@@ -2013,6 +2017,49 @@ export default function App() {
     </div>
   );
 
+  /* Table, minimap and lasso used to sit in the row as three extra buttons.
+     They are extras, not drawing tools, so they live behind one overflow
+     button the way excalidraw.com keeps its own "More tools" menu. */
+  const toolMenuItems = [
+    {
+      key: "laser",
+      label: "เลเซอร์พอยต์",
+      hint: "กดค้างแล้วลาก",
+      icon: <IconLaser />,
+      active: laserOn,
+      onSelect: () => {
+        const api = apiRef.current;
+        if (!api) return;
+        const on = api.getAppState().activeTool?.type === "laser";
+        api.setActiveTool({ type: on ? "selection" : "laser" });
+      },
+    },
+    {
+      key: "table",
+      label: "สร้างตาราง",
+      hint: "ตาราง · UML",
+      icon: <IconTable />,
+      active: panelOpen,
+      onSelect: () => setPanelOpen((value) => !value),
+    },
+    {
+      key: "minimap",
+      label: "แผนที่ย่อ",
+      hint: minimapOn ? "เปิด" : "ปิด",
+      icon: <IconMinimap />,
+      active: minimapOn,
+      onSelect: () => setMinimapOn((value) => !value),
+    },
+    {
+      key: "lasso",
+      label: "เลือกแบบบ่วง",
+      hint: "ลากเส้นรอบ",
+      icon: <IconLasso />,
+      active: lassoArmed,
+      onSelect: () => setLassoArmed((value) => !value),
+    },
+  ];
+
   return (
     <div className={`shell${panelOpen ? " panel-open" : ""}${toolsReady && toolsCollapsed ? " tools-collapsed" : ""}`}>
       {presenceHost ? (
@@ -2031,48 +2078,19 @@ export default function App() {
           {presenceNode}
         </span>
       )}
-      {tableSlot &&
-        createPortal(
-          <>
-            <button
-              type="button"
-              className={`tools-laser${laserOn ? " active" : ""}`}
-              onClick={() => {
-                const api = apiRef.current;
-                if (!api) return;
-                const on = api.getAppState().activeTool?.type === "laser";
-                api.setActiveTool({ type: on ? "selection" : "laser" });
-              }}
-              aria-label="เลเซอร์พอยต์"
-              aria-pressed={laserOn}
-              title="เลเซอร์พอยต์: กดค้างแล้วลาก (K)"
-            >
-              <IconLaser />
-            </button>
-            <button
-              type="button"
-              className={`tools-table${panelOpen ? " active" : ""}`}
-              onClick={() => setPanelOpen((v) => !v)}
-              aria-label="เปิดตัวสร้างตาราง"
-              aria-pressed={panelOpen}
-              title="สร้าง/แก้ตาราง"
-            >
-              <IconTable />
-            </button>
-            <button
-              type="button"
-              className={`tools-minimap${minimapOn ? " active" : ""}`}
-              onClick={() => setMinimapOn((v) => !v)}
-              aria-label={minimapOn ? "ซ่อนแผนที่ย่อ" : "แสดงแผนที่ย่อ"}
-              aria-pressed={minimapOn}
-              title={minimapOn ? "ซ่อนแผนที่ย่อ" : "แสดงแผนที่ย่อ"}
-            >
-              <IconMinimap />
-            </button>
-          </>,
-          tableSlot,
-        )}
-      <LassoTool apiRef={apiRef} canvasRef={canvasRef} host={tableSlot} />
+      <ToolMenu
+        host={tableSlot}
+        open={toolsMenuOpen}
+        onOpenChange={setToolsMenuOpen}
+        items={toolMenuItems}
+      />
+      <LassoTool
+        apiRef={apiRef}
+        canvasRef={canvasRef}
+        armed={lassoArmed}
+        onArmedChange={setLassoArmed}
+        showButton={false}
+      />
       <a className="back-fab" href="/" aria-label="กลับไปหน้ารวมกระดาน" title="กลับไปหน้ารวมกระดาน">
         <IconBack />
       </a>
