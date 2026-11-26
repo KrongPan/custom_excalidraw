@@ -13,8 +13,8 @@ services:
       # one folder per board: <id>/scene.excalidraw + meta.json + history/
       - ./gallery/scenes:/data
       # catalogue page + previews: written at boot and refreshed after every save
-      # (the server runs gallery/build.mjs --no-render; thumbnails come from the
-      # host run of `node gallery/build.mjs`)
+      # (the server runs gallery/build.mjs --no-render; PNG previews come from the
+      # host: `node scripts/watch-previews.mjs` keeps them in step automatically)
       - ./gallery/site:/gallery
     environment:
       # keep the catalogue in step with the boards while the container runs

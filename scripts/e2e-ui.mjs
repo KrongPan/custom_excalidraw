@@ -24,6 +24,7 @@ const results = [];
 let browser;
 let cdp;
 let deleteProbe = null;
+let groupsToDrop = [];
 
 function check(name, ok, detail = "") {
   results.push({ name, ok: Boolean(ok), detail: String(detail || "") });
@@ -76,7 +77,11 @@ class CDP {
         );
       }
       if (message.method === "Log.entryAdded" && message.params?.entry?.level === "error") {
-        this.consoleErrors.push(message.params.entry.text);
+        const entry = message.params.entry;
+        /* a failed subresource carries its address in entry.url; without it the
+           message is just "Failed to load resource: 404" and nobody can tell
+           which file went missing. */
+        this.consoleErrors.push(entry.url ? `${entry.text} (${entry.url})` : entry.text);
       }
     });
   }
@@ -292,7 +297,14 @@ async function api(pathname, options) {
 }
 
 async function deleteBoard(id) {
-  await api(`/api/boards/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+  // a board can still be holding a save when the suite ends, so one DELETE is
+  // best-effort: repeat until the API reports it gone (tests leave no junk)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await api(`/api/boards/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+    const probe = await api(`/api/boards/${encodeURIComponent(id)}`).catch(() => ({ status: 404 }));
+    if (probe.status === 404) return;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
 }
 
 function metaTitle(id) {
@@ -315,10 +327,52 @@ async function waitForBoardCount(min, timeout = 12000) {
   return count;
 }
 
+/* The extra tools (table, ER class, minimap, lasso) live behind one overflow button in
+   the drawing-tools row, so every test that used to click their own buttons
+   opens the menu and picks the row by its Thai label. */
+async function openToolsMenu() {
+  await cdp.click(".tools-more");
+  await cdp.waitFor(`!!document.querySelector(".tools-more-menu")`, { label: "tools menu open" });
+}
+
+async function closeToolsMenu() {
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 53,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 53,
+  });
+  await cdp.waitFor(`!document.querySelector(".tools-more-menu")`, { label: "tools menu closed" });
+}
+
+async function pickTool(label) {
+  await openToolsMenu();
+  const picked = await cdp.evaluate(`(() => {
+    const row = [...document.querySelectorAll(".tools-more-row")]
+      .find((b) => b.querySelector(".tools-more-label")?.textContent === ${JSON.stringify(label)});
+    if (!row) return false;
+    row.click();
+    return true;
+  })()`);
+  if (!picked) throw new Error(`tools menu has no row labelled ${label}`);
+  await cdp.waitFor(`!document.querySelector(".tools-more-menu")`, { label: `tools menu closed after ${label}` });
+}
+
+async function toolRowState(label) {
+  await openToolsMenu();
+  const state = await cdp.evaluate(`(() => {
+    const row = [...document.querySelectorAll(".tools-more-row")]
+      .find((b) => b.querySelector(".tools-more-label")?.textContent === ${JSON.stringify(label)});
+    return row ? { checked: row.getAttribute("aria-checked"), hint: row.querySelector(".tools-more-hint")?.textContent } : null;
+  })()`);
+  await closeToolsMenu();
+  return state;
+}
+
 async function openEditor(boardId = BOARD) {
   await cdp.navigate(`${BASE}/b/${boardId}`);
   await cdp.waitFor(
-    `!!window.__boardsApi && !!document.querySelector(".presence") && !!document.querySelector(".tools-table") && !document.querySelector(".bar") && !document.body.textContent.includes("กำลังโหลดกระดาน")`,
+    `!!window.__boardsApi && !!document.querySelector(".presence") && !!document.querySelector(".tools-more") && !document.querySelector(".bar") && !document.body.textContent.includes("กำลังโหลดกระดาน")`,
     { label: "editor ready" },
   );
 }
@@ -584,10 +638,10 @@ async function openEditor(boardId = BOARD) {
     await sleep(250);
 
     const tablePlacement = await cdp.evaluate(`(() => {
-      const table = document.querySelector(".tools-table");
+      const table = document.querySelector(".tools-more");
       const stack = document.querySelector(".App-toolbar .Stack_horizontal");
       const tools = document.querySelector(".App-toolbar").getBoundingClientRect();
-      const native = document.querySelector(".App-toolbar .ToolIcon_size_medium")?.getBoundingClientRect();
+      const native = document.querySelector(".App-toolbar .ToolIcon__icon")?.getBoundingClientRect();
       const r = table ? table.getBoundingClientRect() : null;
       return {
         inStack: Boolean(stack && table && stack.contains(table)),
@@ -597,7 +651,7 @@ async function openEditor(boardId = BOARD) {
         label: table ? table.getAttribute("aria-label") : null,
       };
     })()`);
-    check("table button moved into the drawing tools row", tablePlacement.inStack && tablePlacement.insideTools, JSON.stringify(tablePlacement));
+    check("the extra tools button moved into the drawing tools row", tablePlacement.inStack && tablePlacement.insideTools, JSON.stringify(tablePlacement));
     const boardButtons = await cdp.evaluate(`(() => {
       const slot = document.querySelector(".tools-table-slot");
       const row = document.querySelector(".App-toolbar").getBoundingClientRect();
@@ -608,15 +662,64 @@ async function openEditor(boardId = BOARD) {
       return { count: all.length, all, vw: innerWidth };
     })()`);
     check(
-      "the board tools (table, ER, minimap, lasso) share the slot and stay inside the row",
-      boardButtons.count === 4 && boardButtons.all.every((b) => b.inside && b.w > 20),
-      JSON.stringify(boardButtons),
+      "one overflow button replaces the extra tools in the row",
+      boardButtons.count === 1 && boardButtons.all[0].cls.includes("tools-more") && boardButtons.all.every((b) => b.inside && b.w > 20),      JSON.stringify(boardButtons),
     );
     check(
-      "table button matches the native tool size",
+      "the overflow button matches the native tool size",
       Math.abs((tablePlacement.w ?? 0) - (tablePlacement.nativeW ?? 29)) < 1.5 &&
         Math.abs((tablePlacement.h ?? 0) - (tablePlacement.nativeH ?? 29)) < 1.5,
       JSON.stringify(tablePlacement),
+    );
+
+    await openToolsMenu();
+    const menuBox = await cdp.evaluate(`(() => {
+      const menu = document.querySelector(".tools-more-menu");
+      const trigger = document.querySelector(".tools-more");
+      const r = menu.getBoundingClientRect();
+      const t = trigger.getBoundingClientRect();
+      return {
+        rows: [...menu.querySelectorAll(".tools-more-row")].map((b) => b.querySelector(".tools-more-label").textContent),
+        role: menu.getAttribute("role"),
+        expanded: trigger.getAttribute("aria-expanded"),
+        inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+        under: r.top >= t.bottom - 1,
+      };
+    })()`);
+    check(
+      "the overflow menu lists the extra tools under its button",
+      menuBox.rows.join("|") === "เลเซอร์พอยต์|สร้างตาราง|วาง ER class|แผนที่ย่อ|เลือกแบบบ่วง" &&
+        menuBox.role === "menu" && menuBox.expanded === "true" && menuBox.inside && menuBox.under,
+      JSON.stringify(menuBox),
+    );
+    await closeToolsMenu();
+    check(
+      "Escape closes the overflow menu without touching the board",
+      (await cdp.evaluate(`!document.querySelector(".tools-more-menu") && document.querySelector(".tools-more").getAttribute("aria-expanded") === "false"`)) === true,
+    );
+
+    await pickTool("เลเซอร์พอยต์");
+    await cdp.waitFor(`window.__boardsApi.getAppState().activeTool.type === "laser"`, {
+      label: "the laser tool",
+      timeout: 4000,
+    }).catch(() => null);
+    const laserState = await toolRowState("เลเซอร์พอยต์");
+    const laserTool = await cdp.evaluate(`window.__boardsApi.getAppState().activeTool.type`);
+    check(
+      "the menu arms the laser and marks the row while it is on",
+      laserTool === "laser" && laserState.checked === "true" && laserState.hint === "กดค้างแล้วลาก",
+      JSON.stringify({ laserTool, ...laserState }),
+    );
+    await cdp.evaluate(`window.__boardsApi.setActiveTool({ type: "selection" })`);
+    await cdp.waitFor(`window.__boardsApi.getAppState().activeTool.type === "selection"`, {
+      label: "back to the selection tool",
+      timeout: 4000,
+    }).catch(() => null);
+    const laserOff = await toolRowState("เลเซอร์พอยต์");
+    check(
+      "picking another tool clears the laser row by itself",
+      laserOff.checked === "false" && (await cdp.evaluate(`window.__boardsApi.getAppState().activeTool.type`)) === "selection",
+      JSON.stringify(laserOff),
     );
 
     const presenceBox = await cdp.evaluate(`(() => {
@@ -663,7 +766,7 @@ async function openEditor(boardId = BOARD) {
     const inertClosed = await cdp.evaluate(`document.querySelector(".panel").hasAttribute("inert")`);
     check("closed table panel is inert", inertClosed === true, inertClosed);
     const beforeTable = await boardElementCount();
-    await cdp.click(".tools-table");
+    await pickTool("สร้างตาราง");
     await cdp.waitFor(`document.querySelector(".panel")?.classList.contains("open")`, {
       label: "table panel open",
     });
@@ -672,14 +775,11 @@ async function openEditor(boardId = BOARD) {
       const r = p.getBoundingClientRect();
       return r.right <= innerWidth + 1 && r.left >= 0;
     })()`, { label: "table panel slides in" });
-    const tableActive = await cdp.evaluate(`(() => {
-      const t = document.querySelector(".tools-table");
-      return { active: t.classList.contains("active"), pressed: t.getAttribute("aria-pressed"), bg: getComputedStyle(t).backgroundColor };
-    })()`);
+    const tableRow = await toolRowState("สร้างตาราง");
     check(
-      "drawing tools button shows the open panel",
-      tableActive.active && tableActive.pressed === "true" && /rgba\(99, 96, 217/.test(tableActive.bg),
-      JSON.stringify(tableActive),
+      "the menu row shows the table panel is open",
+      tableRow?.checked === "true",
+      JSON.stringify(tableRow),
     );
     const panelGlass = await cdp.evaluate(`(() => {
       const panel = document.querySelector(".panel");
@@ -705,8 +805,8 @@ async function openEditor(boardId = BOARD) {
       label: "table panel close",
     });
     check(
-      "drawing tools button clears when the panel closes",
-      (await cdp.evaluate(`document.querySelector(".tools-table").classList.contains("active")`)) === false,
+      "the menu row clears when the panel closes",
+      (await toolRowState("สร้างตาราง"))?.checked === "false",
     );
 
     /* -------------------------------------------------------- save status */
@@ -869,7 +969,7 @@ async function openEditor(boardId = BOARD) {
     const mobilePresence = await cdp.evaluate(`(() => {
       const p = document.querySelector(".presence");
       const r = p.getBoundingClientRect();
-      const table = document.querySelector(".tools-table");
+      const table = document.querySelector(".tools-more");
       const tools = document.querySelector(".App-toolbar").getBoundingClientRect();
       const t = table ? table.getBoundingClientRect() : null;
       const vw = document.documentElement.clientWidth;
@@ -893,8 +993,8 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(mobilePresence),
     );
     check(
-      "phones use Excalidraw's own mobile row without the board buttons",
-      (await cdp.evaluate(`document.querySelectorAll(".App-toolbar .tools-table").length`)) === 0,
+      "phones use Excalidraw's own mobile row without the extra tools button",
+      (await cdp.evaluate(`document.querySelectorAll(".App-toolbar .tools-more").length`)) === 0,
       JSON.stringify(mobilePresence),
     );
     check(
@@ -1087,6 +1187,27 @@ async function openEditor(boardId = BOARD) {
       };
     })()`);
     check("catalog has glass header", /blur/.test(catalogGlass.headerBlur || ""), catalogGlass.headerBlur);
+    const catalogBrand = await cdp.evaluate(`(() => {
+      const img = document.querySelector("header img.brand");
+      const icon = document.querySelector('link[rel="icon"]');
+      const touch = document.querySelector('link[rel="apple-touch-icon"]');
+      const title = document.querySelector("header h1");
+      return {
+        src: img?.getAttribute("src") || null,
+        loaded: img?.naturalWidth || 0,
+        left: img ? Math.round(img.getBoundingClientRect().left) : null,
+        titleLeft: title ? Math.round(title.getBoundingClientRect().left) : null,
+        icon: icon?.getAttribute("href") || null,
+        touch: touch?.getAttribute("href") || null,
+      };
+    })()`);
+    check(
+      "the catalog wears the app logo and tab icon",
+      catalogBrand.loaded >= 64 && catalogBrand.src === "/gallery/logo-64.png" &&
+        catalogBrand.left < catalogBrand.titleLeft &&
+        catalogBrand.icon === "/gallery/logo-32.png" && catalogBrand.touch === "/gallery/logo-180.png",
+      JSON.stringify(catalogBrand),
+    );
     // the catalogue follows the saved theme, so frost means "blur + translucent gradient" in either palette
     const cardAlpha = (() => {
       const match = /rgba?\(([^)]+)\)/.exec(catalogGlass.cardBg || "");
@@ -1149,6 +1270,120 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check("catalog search finds the renamed board", search.visible === 1 && search.slugs[0] === BOARD, JSON.stringify(search));
 
+    /* one board, several หมวดหมู่: it becomes a card in every section */
+    await cdp.click("#q");
+    // React keeps its own value tracker, so a bare el.value = "" is ignored and
+    // the search would keep filtering everything below (sections look ungrouped)
+    await cdp.evaluate(`(() => {
+      const input = document.getElementById("q");
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    await cdp.waitFor(`document.getElementById("q").value === "" && document.querySelectorAll(".card:not([hidden])").length > 1`, {
+      label: "search cleared",
+      timeout: 4000,
+    }).catch(() => null);
+    const groupTag = `${Date.now()}`;
+    const groupOne = (await api("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `e2e-a-${groupTag}`, color: "violet" }),
+    })).body.group;
+    const groupTwo = (await api("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `e2e-b-${groupTag}`, color: "teal" }),
+    })).body.group;
+    groupsToDrop.push(groupOne.id, groupTwo.id);
+    const filed = await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ groupIds: [groupOne.id, groupTwo.id] }),
+    });
+    check(
+      "a board can be filed in two groups at once",
+      filed.status === 200 && JSON.stringify(filed.body.groupIds) === JSON.stringify([groupOne.id, groupTwo.id]),
+      JSON.stringify(filed.body),
+    );
+    await cdp.navigate(`${BASE}/`);
+    await cdp.waitFor(`!!document.querySelector('#group-chips .chip[data-group="${groupOne.id}"]')`, {
+      label: "group chips",
+    });
+    // the catalogue paints the cards from its cached list first and re-files them
+    // once /api/boards answers, so wait for the second copy instead of racing it
+    await cdp
+      .waitFor(`document.querySelectorAll('.card[data-slug="${BOARD}"]').length === 2`, {
+        label: "the board filed under both groups",
+        timeout: 6000,
+      })
+      .catch(() => null);
+    const multi = await cdp.evaluate(`(() => {
+      const copies = [...document.querySelectorAll('.card[data-slug="${BOARD}"]')];
+      const sections = [...document.querySelectorAll(".board-section")].filter((s) =>
+        s.querySelector('.card[data-slug="${BOARD}"]'));
+      const trigger = copies[0]?.querySelector(".card-group");
+      return {
+        copies: copies.length,
+        sections: sections.map((s) => s.dataset.group).sort(),
+        label: trigger?.querySelector(".lbl")?.textContent.trim() || null,
+        expanded: trigger?.getAttribute("aria-expanded") || null,
+        ungrouped: Boolean(document.querySelector('.board-section[data-group="__none__"] .card[data-slug="${BOARD}"]')),
+      };
+    })()`);
+    check(
+      "the catalogue shows it under both groups and not ungrouped",
+      multi.copies === 2 &&
+        JSON.stringify(multi.sections) === JSON.stringify([groupOne.id, groupTwo.id].sort()) &&
+        multi.ungrouped === false,
+      JSON.stringify(multi),
+    );
+    check("the card says how many groups it holds", multi.label === "2 หมวด", multi.label);
+    await cdp.screenshot("/tmp/e2e-catalog-multi.png");
+
+    /* the popover edits membership: untick the second group */
+    await cdp.click(`.card[data-slug="${BOARD}"] .card-group`);
+    await cdp.waitFor(
+      `!document.querySelector('.card[data-slug="${BOARD}"] .group-menu').hidden`,
+      { label: "group menu open" },
+    );
+    const menu = await cdp.evaluate(`(() => {
+      const menu = document.querySelector('.card[data-slug="${BOARD}"] .group-menu');
+      return { boxes: [...menu.querySelectorAll('input[type=checkbox]')].map((b) => ({ id: b.value, checked: b.checked })) };
+    })()`);
+    check(
+      "the menu lists every group with the current ticks",
+      menu.boxes.some((b) => b.id === groupOne.id && b.checked) &&
+        menu.boxes.some((b) => b.id === groupTwo.id && b.checked) &&
+        menu.boxes.some((b) => !b.checked),
+      JSON.stringify(menu),
+    );
+    await cdp.evaluate(`(() => {
+      const box = document.querySelector('.card[data-slug="${BOARD}"] .group-menu input[value="${groupTwo.id}"]');
+      box.click();
+    })()`);
+    await cdp.waitFor(`document.querySelectorAll('.card[data-slug="${BOARD}"]').length === 1`, {
+      label: "one section left",
+      timeout: 8000,
+    });
+    const afterUntick = await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`);
+    check(
+      "unticking a group stores the remaining membership",
+      JSON.stringify(afterUntick.body.groupIds) === JSON.stringify([groupOne.id]),
+      JSON.stringify(afterUntick.body),
+    );
+    const leftLabel = await cdp.evaluate(`document.querySelector('.card[data-slug="${BOARD}"] .card-group .lbl').textContent.trim()`);
+    check("the card names its single remaining group", leftLabel === `e2e-a-${groupTag}`, leftLabel);
+
+    await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ groupIds: [] }),
+    });
+    await api(`/api/groups/${encodeURIComponent(groupOne.id)}`, { method: "DELETE" });
+    await api(`/api/groups/${encodeURIComponent(groupTwo.id)}`, { method: "DELETE" });
+    groupsToDrop = [];
+
     await cdp.viewport(393, 852, true);
     await cdp.navigate(`${BASE}/`);
     await cdp.waitFor(`!!document.querySelector(".card")`, { label: "mobile catalog" });
@@ -1199,15 +1434,28 @@ async function openEditor(boardId = BOARD) {
     await openEditor(REL_BOARD);
     await sleep(500);
 
-    await cdp.click(".tools-er");
-    await cdp.waitFor(`document.querySelector(".er-panel.open")`, { label: "ER panel" });
+    await pickTool("วาง ER class");
+    await cdp.waitFor(`!!document.querySelector(".er-panel.open")`, { label: "ER panel" });
     await cdp.waitFor(`window.__boardsApi.getSceneElements().some((el) => el.customData?.class && el.customData?.frame && !el.isDeleted)`, {
       label: "ER class inserted",
     });
+    await cdp.waitFor(
+      `(() => {
+         const btn = document.querySelector(".er-panel.open .panel-head .icon-btn");
+         if (!btn) return false;
+         const r = btn.getBoundingClientRect();
+         return r.left >= 0 && r.right <= window.innerWidth && r.top >= 0 && r.bottom <= window.innerHeight;
+       })()`,
+      { label: "ER panel slid into view" },
+    );
     await cdp.click(".er-panel .panel-head .icon-btn");
     await cdp.waitFor(`!document.querySelector(".er-panel.open")`, { label: "ER panel closed" });
     await sleep(400);
 
+    await cdp.waitFor(
+      `window.__boardsApi.getSceneElements().some((el) => el.customData?.frame && !el.isDeleted)`,
+      { label: "relation table frame committed" },
+    );
     await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
       const frame = api.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);

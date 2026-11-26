@@ -328,6 +328,14 @@ try {
     assert.equal((await api(base, `/api/boards/${id}/history`)).status, 404);
   });
 
+  await step("a save for a deleted board is refused instead of recreating it", async () => {
+    const scene = { type: "excalidraw", version: 2, elements: [], appState: {} };
+    const res = await api(base, `/api/boards/${id}`, jsonInit("PUT", scene));
+    assert.equal(res.status, 404, "a PUT on a missing board must not create it");
+    await assert.rejects(stat(join(dataDir, id)), "the deleted folder should stay deleted");
+    assert.equal((await api(base, `/api/boards`)).body.boards.some((b) => b.id === id), false);
+  });
+
   await step("DELETE also clears a never-migrated legacy board", async () => {
     const res = await api(base, "/api/boards/legacy-board", { method: "DELETE" });
     assert.equal(res.status, 200);

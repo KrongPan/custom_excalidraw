@@ -26,7 +26,8 @@ ENV NODE_ENV=production \
     APP_DIR=/srv/dist \
     DATA_DIR=/data \
     GALLERY_DIR=/gallery \
-    GALLERY_BUILD=/srv/tools/build.mjs
+    GALLERY_BUILD=/srv/tools/build.mjs \
+    LOGO_DIR=/srv/assets/logo
 
 WORKDIR /srv
 COPY app/server.mjs ./
@@ -39,6 +40,7 @@ COPY --from=build /app/node_modules/ws ./node_modules/ws
 COPY docker/entrypoint.sh /srv/entrypoint.sh
 COPY gallery/build.mjs /srv/tools/build.mjs
 COPY scripts/migrate-scenes.mjs /srv/tools/migrate-scenes.mjs
+COPY assets/logo /srv/assets/logo
 
 # files written by tools that default to 0600 would not be readable by an
 # unprivileged runtime user, which is how the container is normally started

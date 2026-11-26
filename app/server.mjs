@@ -376,14 +376,18 @@ function withBoardLock(id, fn) {
 
 /*
  * `gallery/scenes/<id>/meta.json` is an optional sidecar:
- * { title, subtitle, tags, groupId }. It holds the board's display name and the
- * group it is filed under while the scene file stays a pure Excalidraw document.
+ * { title, subtitle, tags, groupIds, groupId }. It holds the board's display
+ * name and the หมวดหมู่ it is filed under while the scene file stays a pure
+ * Excalidraw document. A board can sit in several groups at once: `groupIds`
+ * is the list, `groupId` is kept in sync as its first entry (null when empty)
+ * so older code and hand-edits still see something sane.
  * Missing, empty or broken sidecars all read as "no metadata".
  * A legacy `<id>.meta.json` next to the flat scene is read until the board is
  * migrated into its folder.
  */
 
 const META_TITLE_MAX = 120;
+const META_GROUPS_MAX = 20;
 
 async function readMeta(id) {
   for (const file of [metaPath(id), legacyMetaPath(id)]) {
@@ -397,20 +401,59 @@ async function readMeta(id) {
   return {};
 }
 
-/** Public shape: the title always exists (falls back to the board id). */
-function metaView(id, meta) {
-  return {
+/**
+ * The membership of one board as a list. `groupIds` is the stored form; the old
+ * single `groupId` is still honoured for hand-written sidecars. Duplicates
+ * collapse (first occurrence wins) and, when a live group set is given, ids
+ * that no longer exist in `.groups.json` disappear on read — they are never
+ * written back by the next patch.
+ */
+const isGroupId = (value) => typeof value === "string" && value.length > 0;
+
+function groupIdsOf(meta, live = null) {
+  const raw = Array.isArray(meta?.groupIds)
+    ? meta.groupIds.filter(isGroupId)
+    : isGroupId(meta?.groupId)
+      ? [meta.groupId]
+      : [];
+  const seen = new Set();
+  const out = [];
+  for (const id of raw) {
+    if (seen.has(id) || (live && !live.has(id))) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** The ids `.groups.json` currently holds; membership is filtered against it. */
+async function liveGroupIds() {
+  const { groups } = await readGroupStore();
+  return new Set(groups.map((group) => group.id));
+}
+
+/**
+ * Public shape: the title always exists (falls back to the board id) and
+ * `groupId` is always the first membership, so one field keeps working for
+ * older clients. `groupIds` rides along whenever the board belongs to
+ * something (and always on a membership write, so a clear echoes `[]`).
+ */
+function metaView(id, meta, { groupIds = groupIdsOf(meta), always = false } = {}) {
+  const view = {
     id,
     title: typeof meta?.title === "string" && meta.title ? meta.title : id,
     subtitle: typeof meta?.subtitle === "string" ? meta.subtitle : "",
     tags: Array.isArray(meta?.tags) ? meta.tags.map(String) : [],
-    groupId: typeof meta?.groupId === "string" && meta.groupId ? meta.groupId : null,
+    groupId: groupIds[0] || null,
   };
+  if (groupIds.length || always) view.groupIds = groupIds;
+  return view;
 }
 
 async function apiMetaGet(res, id) {
   if (!(await boardExists(id))) return fail(res, 404, `board not found: ${id}`);
-  json(res, 200, metaView(id, await readMeta(id)));
+  const meta = await readMeta(id);
+  json(res, 200, metaView(id, meta, { groupIds: groupIdsOf(meta, await liveGroupIds()), always: true }));
 }
 
 async function apiMetaPatch(res, req, id) {
@@ -426,11 +469,14 @@ async function apiMetaPatch(res, req, id) {
     return fail(res, 400, "expected a JSON object");
   }
 
-  // one endpoint, two independent fields: a rename does not touch the group and
-  // filing a board does not rename it (unknown keys stay ignored, as before)
+  // one endpoint, independent keys: a rename does not touch the groups and a
+  // membership write does not rename (unknown keys stay ignored, as before)
   const hasTitle = "title" in body;
-  const hasGroup = "groupId" in body;
-  if (!hasTitle && !hasGroup) return fail(res, 400, 'expected "title" or "groupId" to be set');
+  const hasGroupIds = "groupIds" in body;
+  const hasGroupId = "groupId" in body;
+  const hasMembership = hasGroupIds || hasGroupId;
+  if (hasGroupIds && hasGroupId) return fail(res, 400, "send either groupIds or groupId");
+  if (!hasTitle && !hasMembership) return fail(res, 400, 'expected "title" or "groupIds"/"groupId" to be set');
 
   let title = "";
   if (hasTitle) {
@@ -441,45 +487,75 @@ async function apiMetaPatch(res, req, id) {
     }
   }
 
-  // groupId: a group id files the board, ""/null ungroup it, omitted keeps it
-  let groupId; // undefined = untouched, null = ungrouped, string = that group
-  if (hasGroup) {
+  // groupIds: the complete list — [] ungroups, insertion order is kept and a
+  // repeated id collapses onto its first slot. Members are only checked for
+  // existence further down, under the group lock: "grp_nope" is an unknown id
+  // (404), not a malformed one (400), which is what the UI toasts.
+  let wantedIds; // undefined = untouched, [] = ungrouped, [id, …] = exactly that
+  if (hasGroupIds) {
+    if (!Array.isArray(body.groupIds) || body.groupIds.some((id) => typeof id !== "string")) {
+      return fail(res, 400, 'expected "groupIds" to be an array of strings');
+    }
+    if (body.groupIds.length > META_GROUPS_MAX) {
+      return fail(res, 400, `"groupIds" holds more than ${META_GROUPS_MAX} ids`);
+    }
+    const ids = [];
+    for (const raw of body.groupIds) {
+      const wanted = raw.trim();
+      if (!wanted) return fail(res, 400, 'expected "groupIds" to be an array of strings');
+      if (!ids.includes(wanted)) ids.push(wanted);
+    }
+    wantedIds = ids;
+  } else if (hasGroupId) {
+    // the old single-id shape still works: it replaces the whole list with one
+    // id (or clears it), it never appends to what the board already has
     if (body.groupId === null) {
-      groupId = null;
+      wantedIds = [];
     } else if (typeof body.groupId === "string") {
       const wanted = body.groupId.trim();
-      if (!wanted) groupId = null;
+      if (!wanted) wantedIds = [];
       else if (!GROUP_ID_RE.test(wanted)) return fail(res, 400, "invalid group id");
-      else groupId = wanted;
+      else wantedIds = [wanted];
     } else {
       return fail(res, 400, 'expected "groupId" to be a string or null');
     }
   }
 
   // read-modify-write under the board lock so a rename cannot race a scene save;
-  // filing a board additionally takes the group lock so the group cannot be
-  // deleted between the existence check and the sidecar write
+  // a membership write additionally takes the group lock so a group cannot be
+  // deleted between the existence check and the sidecar write. Groups → board is
+  // the same order apiGroupDelete uses, so the two can never deadlock.
   const apply = () =>
     withBoardLock(id, async () => {
-      if (groupId) {
-        const { groups } = await readGroupStore();
-        if (!groups.some((group) => group.id === groupId)) return null;
-      }
+      const { groups } = await readGroupStore();
+      const live = new Set(groups.map((group) => group.id));
       await migrateLegacy(id); // a rename is a write: the board joins its folder too
       const current = await readMeta(id);
+      // an unrelated patch keeps the board where it is, but ids whose group is
+      // gone are filtered out here — a stale id is never written back
+      const nextIds = wantedIds ?? groupIdsOf(current, live);
+      for (const wanted of nextIds) {
+        if (!live.has(wanted)) return { missing: wanted };
+      }
+
       const next = {};
       const nextTitle = hasTitle ? title : typeof current.title === "string" ? current.title : "";
       if (nextTitle) next.title = nextTitle;
       if (typeof current.subtitle === "string" && current.subtitle) next.subtitle = current.subtitle;
       if (Array.isArray(current.tags) && current.tags.length) next.tags = current.tags;
-      // an unrelated patch keeps the board where it is, exactly like the title;
-      // an explicit clear is stored as `null` (absent key also means ungrouped)
-      const keptGroup = typeof current.groupId === "string" && current.groupId ? current.groupId : null;
-      if (hasGroup) next.groupId = groupId;
-      else if (keptGroup) next.groupId = keptGroup;
+      // both keys are written together so old code and hand-edits agree;
+      // `groupId` mirrors the first membership and null means "no group". A
+      // title-only patch on an ungrouped board keeps its old sidecar shape.
+      if (nextIds.length) {
+        next.groupIds = nextIds;
+        next.groupId = nextIds[0];
+      } else if (hasMembership) {
+        next.groupIds = [];
+        next.groupId = null;
+      }
 
       // nothing custom left: the sidecar goes away instead of holding `{}`
-      const empty = !next.title && !next.subtitle && !next.tags && !next.groupId;
+      const empty = !next.title && !next.subtitle && !next.tags && !nextIds.length;
       if (!empty) {
         await mkdir(boardDir(id), { recursive: true });
         await writeAtomic(metaPath(id), `${JSON.stringify(next, null, 2)}\n`);
@@ -487,13 +563,13 @@ async function apiMetaPatch(res, req, id) {
         await unlink(metaPath(id)).catch(() => {});
         await unlink(legacyMetaPath(id)).catch(() => {});
       }
-      return next;
+      return { meta: next, groupIds: nextIds };
     });
 
-  const meta = hasGroup && groupId ? await withGroupsLock(apply) : await apply();
-  if (!meta) return fail(res, 404, `group not found: ${groupId}`);
+  const outcome = hasMembership ? await withGroupsLock(apply) : await apply();
+  if (outcome?.missing !== undefined) return fail(res, 404, `group not found: ${outcome.missing}`);
 
-  const view = metaView(id, meta);
+  const view = metaView(id, outcome.meta, { groupIds: outcome.groupIds, always: true });
   broadcast(id, { type: "meta", ...view });
   log("meta", id, view.title);
   scheduleGalleryRebuild();
@@ -509,9 +585,10 @@ async function apiMetaPatch(res, req, id) {
  *   { "version": 1, "groups": [ { id, name, color, createdAt, updatedAt } ] }
  *
  * The file is optional — no file (or a broken one) simply means zero groups and
- * is never created by a read. Boards point at a group through their own
- * meta.json (`groupId`), so membership lives with the board and this file only
- * holds the taxonomy. Deleting a group rewrites those sidecars to `null`.
+ * is never created by a read. Boards point at their groups through their own
+ * meta.json (`groupIds`, with `groupId` kept as the first entry), so membership
+ * lives with the board and this file only holds the taxonomy. Deleting a group
+ * rewrites those sidecars to drop just that id.
  */
 const GROUPS_FILE = join(DATA_DIR, ".groups.json");
 const GROUPS_VERSION = 1;
@@ -578,13 +655,17 @@ async function writeGroupStore(groups) {
 
 const sameGroupName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
-/** How many boards sit in each group — one disk scan for the whole list. */
+/**
+ * How many boards include each group — one disk scan for the whole list. A
+ * board filed under two groups counts once in each of them.
+ */
 async function groupCounts() {
   const counts = new Map();
+  const live = await liveGroupIds();
   for (const [id] of await listBoards()) {
-    const meta = await readMeta(id);
-    const groupId = typeof meta?.groupId === "string" ? meta.groupId : "";
-    if (groupId) counts.set(groupId, (counts.get(groupId) || 0) + 1);
+    for (const groupId of groupIdsOf(await readMeta(id), live)) {
+      counts.set(groupId, (counts.get(groupId) || 0) + 1);
+    }
   }
   return counts;
 }
@@ -705,20 +786,23 @@ async function apiGroupDelete(res, id) {
     groups.splice(index, 1);
     await writeGroupStore(groups);
 
-    // Every board filed under the group goes back to ungrouped. Only the
-    // groupId key is rewritten: title/subtitle/tags (and anything hand-added)
-    // stay exactly as they were.
+    // Every board that includes the group loses just that id; its other groups
+    // stay. Only the membership keys are rewritten: title/subtitle/tags (and
+    // anything hand-added) stay exactly as they were.
     let moved = 0;
     for (const [boardId] of await listBoards()) {
       const meta = await readMeta(boardId);
-      if (meta?.groupId !== id) continue;
+      if (!groupIdsOf(meta).includes(id)) continue;
       let cleared = false;
       await withBoardLock(boardId, async () => {
         await migrateLegacy(boardId);
         const current = await readMeta(boardId);
-        if (current?.groupId !== id) return; // a concurrent patch already moved it
+        const before = groupIdsOf(current);
+        const kept = before.filter((groupId) => groupId !== id);
+        if (kept.length === before.length) return; // a concurrent patch already moved it
         await mkdir(boardDir(boardId), { recursive: true });
-        await writeAtomic(metaPath(boardId), `${JSON.stringify({ ...current, groupId: null }, null, 2)}\n`);
+        const next = { ...current, groupIds: kept, groupId: kept[0] || null };
+        await writeAtomic(metaPath(boardId), `${JSON.stringify(next, null, 2)}\n`);
         cleared = true;
       });
       if (cleared) moved += 1;
@@ -727,7 +811,7 @@ async function apiGroupDelete(res, id) {
   });
 
   if (outcome.missing) return fail(res, 404, `group not found: ${id}`);
-  log("group deleted", id, `(${outcome.moved} board(s) ungrouped)`);
+  log("group deleted", id, `(${outcome.moved} board(s) moved)`);
   scheduleGalleryRebuild();
   json(res, 200, { deleted: id, moved: outcome.moved });
 }
@@ -800,10 +884,12 @@ async function listBoards() {
 
 async function apiList(res) {
   const boards = [];
+  const live = await liveGroupIds();
   for (const [id, path] of await listBoards()) {
     try {
       const info = await stat(path);
       const meta = await readMeta(id);
+      const groupIds = groupIdsOf(meta, live);
       let elements = null;
       try {
         const scene = JSON.parse(await readFile(path, "utf8"));
@@ -815,7 +901,10 @@ async function apiList(res) {
         id,
         title: meta?.title ? String(meta.title) : id,
         subtitle: meta?.subtitle ? String(meta.subtitle) : "",
-        groupId: typeof meta?.groupId === "string" && meta.groupId ? meta.groupId : null,
+        // groupId stays for older clients and mirrors the first membership;
+        // groupIds is always an array ([] = no group) so a card can render it
+        groupId: groupIds[0] || null,
+        groupIds,
         bytes: info.size,
         updated: info.mtimeMs,
         elements,
@@ -848,13 +937,17 @@ async function apiCreate(res, req) {
 async function apiGet(res, id) {
   const file = await sceneFile(id);
   if (!file) return fail(res, 404, `board not found: ${id}`);
+  let raw;
   try {
-    const raw = await readFile(file, "utf8");
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-    res.end(raw);
+    raw = await readFile(file, "utf8");
   } catch {
     return fail(res, 404, `board not found: ${id}`);
   }
+  // A scene is served byte-for-byte: membership lives in the sidecar and rides
+  // on /api/boards and /api/boards/:id/meta, not inside the Excalidraw document
+  // (re-encoding a multi-megabyte scene on every open only costs time).
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(raw);
 }
 
 async function apiPut(res, req, id) {
@@ -868,6 +961,9 @@ async function apiPut(res, req, id) {
   if (scene?.type !== "excalidraw" || !Array.isArray(scene.elements)) {
     return fail(res, 400, 'expected a scene object with type "excalidraw" and an elements array');
   }
+  // a tab left open on a board that somebody deleted must not bring it back:
+  // only POST /api/boards creates a board, a PUT writes an existing one
+  if (!(await boardExists(id))) return fail(res, 404, `board not found: ${id}`);
   await withBoardLock(id, () => saveScene(id, scene));
   scheduleGalleryRebuild();
   json(res, 200, { id, elements: scene.elements.length, savedAt: Date.now() });
@@ -985,6 +1081,12 @@ function queuePersist(id, scene, done) {
     entry.scene = null;
     if (!payload) return;
     try {
+      // deleting a board closes its room, but a frame already in flight would
+      // otherwise recreate the folder on disk
+      if (!(await boardExists(id))) {
+        for (const w of waiters) w(false);
+        return;
+      }
       await withBoardLock(id, () => saveScene(id, payload));
       for (const w of waiters) w(true);
     } catch (error) {
@@ -1056,7 +1158,21 @@ live.on("connection", (ws, request, id) => {
       const x = Number(message.x);
       const y = Number(message.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      broadcast(id, { type: "pointer", from: ws.peerId, color: ws.peerColor, x, y }, ws);
+      // a laser packet carries the pointer mode and the button state, so the
+      // other tab can draw a trail between the points instead of a dot
+      broadcast(
+        id,
+        {
+          type: "pointer",
+          from: ws.peerId,
+          color: ws.peerColor,
+          x,
+          y,
+          tool: message.tool === "laser" ? "laser" : "pointer",
+          button: message.button === "down" ? "down" : "up",
+        },
+        ws,
+      );
     }
   });
 

@@ -14,3 +14,5 @@ gallery/site
 
 *.log
 *.png
+# …except the logo, which the catalogue builder copies into the site
+!assets/logo/*.png
