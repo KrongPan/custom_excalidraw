@@ -67,13 +67,16 @@ function frameBox(frame) {
 function arrowGeometryFromPoints(points) {
   const xs = points.map((point) => point.x);
   const ys = points.map((point) => point.y);
-  const x = round(Math.min(...xs));
-  const y = round(Math.min(...ys));
+  /* Excalidraw insists a linear element's first point sits at (0,0) — it logs
+     "Linear element is not normalized" otherwise — so x/y follow the first
+     point, not the bounding box corner. width/height stay the bbox size. */
+  const x = round(points[0].x);
+  const y = round(points[0].y);
   return {
     x,
     y,
-    width: round(Math.max(...xs) - x),
-    height: round(Math.max(...ys) - y),
+    width: round(Math.max(...xs) - Math.min(...xs)),
+    height: round(Math.max(...ys) - Math.min(...ys)),
     points: points.map((point) => [round(point.x - x), round(point.y - y)]),
   };
 }
@@ -270,6 +273,42 @@ function cloneClassAndConnect(list, sourceGridId, direction, sourceFrame) {
     cloneGridId,
     arrowId,
   };
+}
+
+/**
+ * Draw one relation arrow between two grids the person already placed, facing
+ * their nearest sides. No cloning happens here: the ER tool links nodes, it
+ * never grows the board by copying them.
+ *
+ * @param {object[]} elements
+ * @param {string} fromGridId
+ * @param {string} toGridId
+ * @returns {{elements: object[], arrowId: string}}
+ */
+export function connectGrids(elements, fromGridId, toGridId) {
+  const list = Array.isArray(elements) ? elements : [];
+  if (!fromGridId || !toGridId || fromGridId === toGridId) {
+    throw new Error("เลือกสองคลาสที่ต่างกันก่อน");
+  }
+  let out = list.slice();
+  for (const gridId of [fromGridId, toGridId]) {
+    const next = ensureGridFrame(out, gridId, { create: true });
+    if (next) out = next;
+  }
+  const fromFrame = out.find((el) => isGridFrame(el, fromGridId));
+  const toFrame = out.find((el) => isGridFrame(el, toGridId));
+  if (!fromFrame || !toFrame) throw new Error("ไม่พบเฟรมของคลาสที่เลือก");
+  const arrow = makeRelationArrow({
+    id: newArrowId(),
+    endpoints: facingEndpoints(frameBox(fromFrame), frameBox(toFrame)),
+    fromFrame,
+    toFrame,
+    fromGrid: fromGridId,
+    toGrid: toGridId,
+  });
+  const combined = [...out, arrow];
+  const synced = syncRelations(combined) ?? combined;
+  return { elements: synced, arrowId: arrow.id };
 }
 
 /**

@@ -17,7 +17,7 @@ import {
 } from "./class.js";
 import RelationPanel from "./RelationPanel.jsx";
 import RelationWaypoints from "./RelationWaypoints.jsx";
-import ErHoverArrows from "./ErHoverArrows.jsx";
+import GridAddControl from "./GridAddControl.jsx";
 import ErRowControls from "./ErRowControls.jsx";
 import Minimap from "./Minimap.jsx";
 import LassoTool, { IconLasso } from "./tools/LassoTool.jsx";
@@ -32,7 +32,7 @@ import {
   resizeGridColumn,
   resizeGridRow,
 } from "./table.js";
-import { applyCardinalityToElements, cloneAndConnect, describeRelation, syncRelations } from "./relations.js";
+import { applyCardinalityToElements, connectGrids, describeRelation, syncRelations } from "./relations.js";
 
 const SAVE_DELAY = 900; // http fallback (no websocket)
 const LIVE_DELAY = 300; // websocket push while several people edit
@@ -290,6 +290,8 @@ export default function App() {
   const [selectedClass, setSelectedClass] = useState(null);
   const [activeClassRows, setActiveClassRows] = useState([]);
   const [selectedRelation, setSelectedRelation] = useState(null);
+  // class grids highlighted together — the ER panel links two of them
+  const [classPicks, setClassPicks] = useState([]);
   const [activeCell, setActiveCell] = useState(null);
   const [peers, setPeers] = useState([]);
   const [live, setLive] = useState("connecting"); // connecting | open | closed
@@ -791,6 +793,11 @@ export default function App() {
     return a.arrowId === b.arrowId && a.fromGrid === b.fromGrid && a.toGrid === b.toGrid && a.preset === b.preset;
   };
 
+  /* Two class nodes picked together are the ER tool's pair to link; ordering is
+     the click order, so the arrow starts at the first one picked. */
+  const sameClassPicks = (a, b) =>
+    a.length === b.length && a.every((pick, i) => pick.grid === b[i].grid && pick.title === b[i].title);
+
   const onChange = useCallback(
     (elements, appState, files) => {
       // Which table is selected has to follow the scene from the first click, even
@@ -822,6 +829,16 @@ export default function App() {
       );
       const relation = pickedArrows.length === 1 ? describeRelation(pickedArrows[0]) : null;
       setSelectedRelation((prev) => (sameRelation(prev, relation) ? prev : relation));
+
+      const picks = [];
+      for (const el of elements) {
+        const gridId = el.customData?.grid;
+        if (!selectedIds[el.id] || !gridId || el.isDeleted) continue;
+        if (picks.some((pick) => pick.grid === gridId)) continue;
+        if (!isClassGrid(elements, gridId)) continue;
+        picks.push({ grid: gridId, title: describeClass(elements, gridId)?.title || "class" });
+      }
+      setClassPicks((prev) => (sameClassPicks(prev, picks) ? prev : picks));
 
       if (Date.now() < armedAtRef.current) {
         // The burst that follows a load is Excalidraw restoring what the file
@@ -1654,8 +1671,53 @@ export default function App() {
     const sceneY = rect.height / 2 / zoom - (state.scrollY || 0);
     const frame = built.elements.find((el) => el.id === built.frameId);
     if (!frame) return;
-    const dx = Math.round(sceneX - frame.width / 2);
-    const dy = Math.round(sceneY - frame.height / 2);
+    // A new class must land on empty, visible canvas: the first one goes to the
+    // centre (stepping past any table already there), the next ones beside the
+    // last class, and the result is clamped back into the viewport so a class is
+    // never placed off-screen behind the panels.
+    const viewLeft = -(state.scrollX || 0);
+    const viewTop = -(state.scrollY || 0);
+    const viewRight = viewLeft + rect.width / zoom;
+    const viewBottom = viewTop + rect.height / zoom;
+    const classes = api
+      .getSceneElements()
+      .filter((el) => !el.isDeleted && el.customData?.class === true && el.customData?.frame === true);
+    let dx;
+    let dy;
+    if (classes.length) {
+      const right = Math.max(...classes.map((el) => el.x + el.width));
+      const leftmost = Math.min(...classes.map((el) => el.x));
+      const top = Math.min(...classes.map((el) => el.y));
+      const bottom = Math.max(...classes.map((el) => el.y + el.height));
+      // beside the last class first, then a new row under them, then their left
+      const fits = (x, y) =>
+        x >= viewLeft + 24 &&
+        y >= viewTop + 24 &&
+        x + frame.width <= viewRight - 24 &&
+        y + frame.height <= viewBottom - 24;
+      const spots = [
+        { x: right + 80, y: top },
+        { x: leftmost, y: bottom + 60 },
+        { x: leftmost - frame.width - 80, y: top },
+      ];
+      const spot = spots.find((candidate) => fits(candidate.x, candidate.y)) || spots[0];
+      dx = Math.round(spot.x);
+      dy = Math.round(spot.y);
+    } else {
+      dx = Math.round(sceneX - frame.width / 2);
+      dy = Math.round(sceneY - frame.height / 2);
+      const taken = api
+        .getSceneElements()
+        .filter((el) => !el.isDeleted && el.width && el.height && el.customData?.grid);
+      const inside = (x, y) =>
+        taken.some((el) => x >= el.x && x <= el.x + el.width && y >= el.y && y <= el.y + el.height);
+      for (let step = 0; step < 10 && inside(dx + frame.width / 2, dy + frame.height / 2); step += 1) {
+        dx += 80;
+        dy += 80;
+      }
+    }
+    dx = Math.round(Math.max(viewLeft + 24, Math.min(dx, viewRight - frame.width - 24)));
+    dy = Math.round(Math.max(viewTop + 24, Math.min(dy, viewBottom - frame.height - 24)));
     const placed = built.elements.map((el) => ({ ...el, x: el.x + dx, y: el.y + dy }));
     const selectedElementIds = {};
     for (const el of placed) selectedElementIds[el.id] = true;
@@ -1669,36 +1731,43 @@ export default function App() {
     setErPanelOpen(true);
   }, [canvasRef, queueSave]);
 
-  /** Clone the table under a hover handle, then link source and clone. */
-  const cloneTable = useCallback(
-    (gridId, direction) => {
+  /** The `+` handle on a table: grow that table in place by one row or column. */
+  const growGridFromHandle = useCallback(
+    (gridId, axis, kind) => {
       const api = apiRef.current;
       if (!api) return;
       try {
-        const result = cloneAndConnect(api.getSceneElements(), gridId, direction);
-        const cloneElements = result.elements.filter((el) => el.customData?.grid === result.cloneGridId);
-        const selectedElementIds = {};
-        for (const el of cloneElements) selectedElementIds[el.id] = true;
-        api.updateScene({
-          elements: result.elements,
-          appState: { selectedElementIds },
-          captureUpdate: "IMMEDIATELY",
-        });
-        const cloneFrame = cloneElements.find((el) => el.customData?.frame);
-        if (cloneFrame) {
-          try {
-            api.scrollToContent(cloneFrame, { fitToContent: false, animate: true });
-          } catch {
-            /* scrolling is a nicety */
-          }
+        const sceneNow = api.getSceneElements();
+        if (kind === "class" || isClassGrid(sceneNow, gridId)) {
+          // a class only grows its field list: its columns are fixed by the format
+          const spec = describeClass(sceneNow, gridId);
+          const lines = (spec?.fields || []).length;
+          addClassRow({ grid: gridId, section: "fields", index: Math.max(0, lines - 1) });
+          return;
         }
-        queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+        const meta = describeGrid(sceneNow, gridId);
+        if (meta) growGrid(meta, axis);
       } catch (error) {
-        console.error("clone table failed", error);
+        console.error("grow grid failed", error);
       }
     },
-    [queueSave],
+    [addClassRow, describeGrid, growGrid],
   );
+
+  /** ER tool: link the two picked classes with one crowfoot arrow. */
+  const connectPickedClasses = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    const [from, to] = classPicks;
+    if (!from || !to) return;
+    try {
+      const result = connectGrids(api.getSceneElements(), from.grid, to.grid);
+      api.updateScene({ elements: result.elements, captureUpdate: "IMMEDIATELY" });
+      queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
+    } catch (error) {
+      console.error("connect classes failed", error);
+    }
+  }, [classPicks, queueSave]);
 
   /** Persist the scene after a waypoint drag (the drag itself is live). */
   const commitRelationRoute = useCallback(() => {
@@ -2002,10 +2071,14 @@ export default function App() {
     },
     {
       key: "er",
-      label: "วาง ER class",
-      hint: "ER · UML",
+      label: "ER diagram",
+      hint: "class · ความสัมพันธ์",
       icon: <IconEr />,
-      onSelect: insertErClass,
+      active: erPanelOpen,
+      onSelect: () => {
+        setPanelOpen(false);
+        setErPanelOpen((value) => !value);
+      },
     },
     {
       key: "minimap",
@@ -2077,12 +2150,7 @@ export default function App() {
           }}
         />
         <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
-        <ErHoverArrows
-          apiRef={apiRef}
-          canvasRef={canvasRef}
-          onClone={cloneTable}
-          enabled={activeClassRows.length === 0}
-        />
+        <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onGrow={growGridFromHandle} />
         <ErRowControls
           apiRef={apiRef}
           canvasRef={canvasRef}
@@ -2129,6 +2197,9 @@ export default function App() {
         open={erPanelOpen}
         onClose={() => setErPanelOpen(false)}
         selected={selectedClass}
+        picks={classPicks}
+        onInsert={insertErClass}
+        onConnect={connectPickedClasses}
         onUpdate={(spec) => applyClass(selectedClass, spec)}
       />
     </div>

@@ -621,7 +621,7 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check(
       "the overflow menu lists the extra tools under its button",
-      menuBox.rows.join("|") === "เลเซอร์พอยต์|สร้างตาราง|วาง ER class|แผนที่ย่อ|เลือกแบบบ่วง" &&
+      menuBox.rows.join("|") === "เลเซอร์พอยต์|สร้างตาราง|ER diagram|แผนที่ย่อ|เลือกแบบบ่วง" &&
         menuBox.role === "menu" && menuBox.expanded === "true" && menuBox.inside && menuBox.under,
       JSON.stringify(menuBox),
     );
@@ -740,6 +740,90 @@ async function openEditor(boardId = BOARD) {
     check(
       "the menu row clears when the panel closes",
       (await toolRowState("สร้างตาราง"))?.checked === "false",
+    );
+
+    /* the `+` handle on a table grows it in place; it never clones it */
+    const gridShape = (gridId) =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const els = api.getSceneElements().filter((el) => !el.isDeleted);
+        const cells = els.filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && el.customData?.r != null);
+        return {
+          rows: new Set(cells.map((el) => el.customData.r)).size,
+          cols: new Set(cells.map((el) => el.customData.c)).size,
+          frames: new Set(els.filter((el) => el.customData?.frame).map((el) => el.customData.grid)).size,
+          arrows: els.filter((el) => el.type === "arrow").length,
+        };
+      })()`);
+    // hover the middle of a grid: bounds come from its cells, because a plain
+    // table only gets a frame element once a relation needs one
+    const hoverFrame = async (gridId) => {
+      const point = await cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
+        if (!els.length) return null;
+        const left = Math.min(...els.map((el) => el.x));
+        const top = Math.min(...els.map((el) => el.y));
+        const right = Math.max(...els.map((el) => el.x + el.width));
+        const bottom = Math.max(...els.map((el) => el.y + el.height));
+        api.scrollToContent(els, { fitToContent: true, animate: false });
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        return {
+          x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
+          y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
+        };
+      })()`);
+      if (!point) throw new Error(`grid ${gridId} has no elements to hover`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
+      await cdp.waitFor(`document.querySelector(".grid-add")?.classList.contains("visible")`, { label: "grid + handle" });
+    };
+    const tableGrid = await cdp.evaluate(`(() => {
+      const cell = window.__boardsApi.getSceneElements()
+        .find((el) => el.customData?.grid && el.customData?.class !== true && !el.isDeleted);
+      return cell?.customData?.grid || null;
+    })()`);
+    check("the inserted table has a grid handle target", Boolean(tableGrid), String(tableGrid));
+    const tableBefore = await gridShape(tableGrid);
+    await hoverFrame(tableGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
+    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "grid add menu" });
+    const addRows = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].map((b) => b.textContent.trim())`);
+    check(
+      "the + offers a row and a column",
+      addRows.join("|") === "+ แถว|+ คอลัมน์",
+      JSON.stringify(addRows),
+    );
+    await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].find((b) => b.textContent.trim() === "+ แถว").click()`);
+    await cdp.waitFor(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
+      return new Set(cells.map((el) => el.customData.r)).size === ${tableBefore.rows + 1};
+    })()`, { label: "table grew a row" });
+    const rowGrown = await gridShape(tableGrid);
+    check(
+      "+ แถว grows the same table and adds no second one",
+      rowGrown.rows === tableBefore.rows + 1 &&
+        rowGrown.cols === tableBefore.cols &&
+        rowGrown.frames === tableBefore.frames &&
+        rowGrown.arrows === 0,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(rowGrown)}`,
+    );
+    await hoverFrame(tableGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
+    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "grid add menu again" });
+    await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].find((b) => b.textContent.trim() === "+ คอลัมน์").click()`);
+    await cdp.waitFor(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
+      return new Set(cells.map((el) => el.customData.c)).size === ${tableBefore.cols + 1};
+    })()`, { label: "table grew a column" });
+    const colGrown = await gridShape(tableGrid);
+    check(
+      "+ คอลัมน์ adds a column to the same table",
+      colGrown.cols === tableBefore.cols + 1 && colGrown.frames === tableBefore.frames,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(colGrown)}`,
     );
 
     /* -------------------------------------------------------- save status */
@@ -1351,7 +1435,7 @@ async function openEditor(boardId = BOARD) {
     check("hold-to-confirm deletes a board", deleted.status === 404, `API ${deleted.status}`);
     deleteProbe = null;
 
-    /* ------------------------------------------------ table relations */
+    /* ------------------------------------------------ ER tool: classes and links */
     const REL_BOARD = "e2e-rel-probe";
     await deleteBoard(REL_BOARD);
     const relCreated = await api("/api/boards", {
@@ -1367,8 +1451,37 @@ async function openEditor(boardId = BOARD) {
     await openEditor(REL_BOARD);
     await sleep(500);
 
-    await pickTool("วาง ER class");
-    await cdp.waitFor(`!!document.querySelector(".er-panel.open")`, { label: "ER panel" });
+    const classScene = () =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const els = api.getSceneElements().filter((el) => !el.isDeleted);
+        return {
+          classes: new Set(els.filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid)).size,
+          grids: new Set(els.filter((el) => el.customData?.frame).map((el) => el.customData.grid)).size,
+          arrows: els.filter((el) => el.type === "arrow").length,
+        };
+      })()`);
+
+    // the ER panel's own action button, found by its Thai label
+    const erButton = (label) =>
+      `[...document.querySelectorAll(".er-panel .panel-body button.btn")].find((b) => b.textContent.trim() === ${JSON.stringify(label)})`;
+    const openErPanel = async () => {
+      if (await cdp.evaluate(`!!document.querySelector(".er-panel.open")`)) return;
+      await pickTool("ER diagram");
+      await cdp.waitFor(`document.querySelector(".er-panel")?.classList.contains("open")`, { label: "ER panel open" });
+    };
+
+    await pickTool("ER diagram");
+    await cdp.waitFor(`document.querySelector(".er-panel")?.classList.contains("open")`, { label: "ER panel" });
+    const erRow = await toolRowState("ER diagram");
+    const emptyScene = await classScene();
+    check(
+      "ER diagram is a tool of its own with its own panel",
+      erRow?.checked === "true" && emptyScene.classes === 0,
+      `${JSON.stringify(erRow)} / ${JSON.stringify(emptyScene)}`,
+    );
+
+    await cdp.evaluate(`(${erButton("+ class ใหม่")}).click()`);
     await cdp.waitFor(`window.__boardsApi.getSceneElements().some((el) => el.customData?.class && el.customData?.frame && !el.isDeleted)`, {
       label: "ER class inserted",
     });
@@ -1381,60 +1494,65 @@ async function openEditor(boardId = BOARD) {
        })()`,
       { label: "ER panel slid into view" },
     );
+    const placed = await classScene();
+    check("the ER panel places a class node", placed.classes === 1 && placed.arrows === 0, JSON.stringify(placed));
     await cdp.click(".er-panel .panel-head .icon-btn");
     await cdp.waitFor(`!document.querySelector(".er-panel.open")`, { label: "ER panel closed" });
-    await sleep(400);
+    await sleep(300);
 
-    await cdp.waitFor(
-      `window.__boardsApi.getSceneElements().some((el) => el.customData?.frame && !el.isDeleted)`,
-      { label: "relation table frame committed" },
-    );
+    /* a class grows its field rows from the + handle; it offers no column */
+    const firstClassGrid = await cdp.evaluate(`(() => {
+      const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
+      return frame?.customData?.grid || null;
+    })()`);
+    const classFields = () =>
+      cdp.evaluate(`(() => {
+        const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
+        return frame?.customData?.classData?.fields?.length ?? -1;
+      })()`.replace("__GRID__", firstClassGrid));
+    const fieldsBefore = await classFields();
+    await hoverFrame(firstClassGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
+    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "class add menu" });
+    const classAddRows = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].map((b) => b.textContent.trim())`);
+    check("a class grows only its field rows from +", classAddRows.join("|") === "+ แถว", JSON.stringify(classAddRows));
+    await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
+    await cdp.waitFor(`(() => {
+      const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
+      return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore + 1};
+    })()`.replace("__GRID__", firstClassGrid), { label: "class grew a field row" });
+    check("+ แถว adds a field to the class", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
+
+    /* two classes picked together are linked — never cloned */
+    await openErPanel();
+    await cdp.evaluate(`(${erButton("+ class ใหม่")}).click()`);
+    await cdp.waitFor(`(() => {
+      const els = window.__boardsApi.getSceneElements().filter((el) => !el.isDeleted);
+      return new Set(els.filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid)).size === 2;
+    })()`, { label: "second class inserted" });
     await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
-      const frame = api.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
-      api.scrollToContent(frame, { fitToContent: true, animate: false });
-      return true;
+      const frames = api.getSceneElements().filter((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
+      const selectedElementIds = {};
+      for (const frame of frames) selectedElementIds[frame.id] = true;
+      api.updateScene({ appState: { selectedElementIds } });
+      return frames.length;
     })()`);
-    await sleep(250);
-    const tablePoint = await cdp.evaluate(`(() => {
-      const api = window.__boardsApi;
-      const s = api.getAppState();
-      const zoom = s.zoom?.value || 1;
-      const host = document.querySelector(".canvas").getBoundingClientRect();
-      const frame = api.getSceneElements().find((el) => el.customData?.class && el.customData?.frame && !el.isDeleted);
-      return {
-        x: host.left + (frame.x + frame.width / 2 + (s.scrollX || 0)) * zoom,
-        y: host.top + (frame.y + frame.height / 2 + (s.scrollY || 0)) * zoom,
-      };
-    })()`);
-    await cdp.send("Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: tablePoint.x,
-      y: tablePoint.y,
-      button: "none",
-      buttons: 0,
+    await cdp.waitFor(`(() => { const b = (${erButton("เชื่อม 2 class")}); return !!b && !b.disabled; })()`, {
+      label: "connect two classes enabled",
     });
-    await cdp.waitFor(`document.querySelector(".table-hover-arrows")?.classList.contains("visible")`, {
-      label: "ER hover arrows appear",
+    const beforeLink = await classScene();
+    await cdp.evaluate(`(${erButton("เชื่อม 2 class")}).click()`);
+    await cdp.waitFor(`window.__boardsApi.getSceneElements().some((el) => el.type === "arrow" && el.customData?.relation)`, {
+      label: "relation between two classes",
     });
-    const hoverButtons = await cdp.evaluate(`(() => {
-      const out = {};
-      for (const b of document.querySelectorAll(".table-hover-arrow")) {
-        const r = b.getBoundingClientRect();
-        out[b.dataset.direction] = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      }
-      return out;
-    })()`);
-    check("ER class hover shows four directions", Object.keys(hoverButtons).length === 4, JSON.stringify(Object.keys(hoverButtons)));
-
-    await cdp.evaluate(`document.querySelector('.table-hover-arrow[data-direction="right"]').click()`);
-    await cdp.waitFor(`(() => {
-      const api = window.__boardsApi;
-      const els = api.getSceneElements();
-      const frames = new Set(els.filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid));
-      return frames.size === 2 && els.some((el) => el.type === "arrow" && el.customData?.relation);
-    })()`, { label: "ER clone and relation created" });
-    await sleep(500);
+    await sleep(400);
+    const linked = await classScene();
+    check(
+      "linking two classes draws one arrow and clones nothing",
+      linked.classes === 2 && linked.grids === 2 && linked.arrows === 1,
+      `${JSON.stringify(beforeLink)} -> ${JSON.stringify(linked)}`,
+    );
     const relation = await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
       const els = api.getSceneElements();
@@ -1447,41 +1565,23 @@ async function openEditor(boardId = BOARD) {
       return {
         from,
         to,
-        sourceTitle: fromFrame?.customData.classData?.title,
-        cloneTitle: toFrame?.customData.classData?.title,
-        cloneFields: toFrame?.customData.classData?.fields?.length,
-        cloneMethods: toFrame?.customData.classData?.methods?.length,
-        sourceFrame: fromFrame && { x: fromFrame.x, y: fromFrame.y, w: fromFrame.width, h: fromFrame.height },
-        cloneFrame: toFrame && { x: toFrame.x, y: toFrame.y, w: toFrame.width, h: toFrame.height },
         heads: [arrow.startArrowhead, arrow.endArrowhead],
         start: arrow.startBinding?.elementId,
         end: arrow.endBinding?.elementId,
-        sourceBound: (fromFrame?.boundElements || []).some((b) => b.id === arrow.id),
-        cloneBound: (toFrame?.boundElements || []).some((b) => b.id === arrow.id),
+        fromBound: (fromFrame?.boundElements || []).some((b) => b.id === arrow.id),
+        toBound: (toFrame?.boundElements || []).some((b) => b.id === arrow.id),
       };
     })()`);
     check(
-      "ER clone keeps the class name, fields and methods",
-      relation.cloneTitle === relation.sourceTitle &&
-        relation.cloneFields === 3 &&
-        relation.cloneMethods === 1,
-      JSON.stringify(relation),
-    );
-    check(
-      "ER clone is placed to the right",
-      relation.cloneFrame.x >= relation.sourceFrame.x + relation.sourceFrame.w + 139,
-      JSON.stringify(relation.cloneFrame),
-    );
-    check(
-      "ER relation arrow binds both class frames",
+      "the relation arrow binds both class frames",
       relation.start === `${relation.from}-frame` &&
         relation.end === `${relation.to}-frame` &&
-        relation.sourceBound &&
-        relation.cloneBound,
+        relation.fromBound &&
+        relation.toBound,
       JSON.stringify(relation),
     );
     check(
-      "new ER relation defaults to 1:1",
+      "a new ER relation starts as 1:1",
       relation.heads[0] === "crowfoot_one" && relation.heads[1] === "crowfoot_one",
       String(relation.heads),
     );
@@ -1499,9 +1599,11 @@ async function openEditor(boardId = BOARD) {
       const zoom = s.zoom?.value || 1;
       const host = document.querySelector(".canvas").getBoundingClientRect();
       const arrow = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
+      const first = arrow.points[0];
+      const last = arrow.points[arrow.points.length - 1];
       return {
-        x: host.left + (arrow.x + arrow.width / 2 + (s.scrollX || 0)) * zoom,
-        y: host.top + (arrow.y + arrow.height / 2 + (s.scrollY || 0)) * zoom,
+        x: host.left + (arrow.x + (first[0] + last[0]) / 2 + (s.scrollX || 0)) * zoom,
+        y: host.top + (arrow.y + (first[1] + last[1]) / 2 + (s.scrollY || 0)) * zoom,
       };
     })()`);
     await cdp.clickPoint(arrowPoint.x, arrowPoint.y);
@@ -1530,6 +1632,12 @@ async function openEditor(boardId = BOARD) {
       const a = window.__boardsApi.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
       return [a.startArrowhead, a.endArrowhead];
     })()`);
+    const normalised = await cdp.evaluate(`(() => {
+      const arrows = window.__boardsApi.getSceneElements().filter((el) => el.type === "arrow" && !el.isDeleted);
+      return arrows.every((el) => el.points[0][0] === 0 && el.points[0][1] === 0);
+    })()`);
+    check("relation arrows keep Excalidraw's normalised points", normalised === true, String(normalised));
+
     check(
       "N:N sets both crowfoot heads",
       heads[0] === "crowfoot_many" && heads[1] === "crowfoot_many",
@@ -1544,20 +1652,25 @@ async function openEditor(boardId = BOARD) {
     })()`, { label: "relation persisted after reload" });
     const persisted = await cdp.evaluate(`(() => {
       const api = window.__boardsApi;
-      const a = api.getSceneElements().find((el) => el.type === "arrow" && el.customData?.relation);
-      const frames = new Set(api.getSceneElements().filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid));
-      return { frames: frames.size, heads: [a?.startArrowhead, a?.endArrowhead], bound: (a?.startBinding?.elementId || "").endsWith("-frame") };
+      const els = api.getSceneElements().filter((el) => !el.isDeleted);
+      const a = els.find((el) => el.type === "arrow" && el.customData?.relation);
+      return {
+        classes: new Set(els.filter((el) => el.customData?.class && el.customData?.frame).map((el) => el.customData.grid)).size,
+        arrows: els.filter((el) => el.type === "arrow").length,
+        heads: [a?.startArrowhead, a?.endArrowhead],
+        bound: (a?.startBinding?.elementId || "").endsWith("-frame"),
+      };
     })()`);
     check(
-      "ER relation and cardinality persist after reload",
-      persisted.frames === 2 &&
+      "ER classes and their relation persist after reload",
+      persisted.classes === 2 &&
+        persisted.arrows === 1 &&
         persisted.heads[0] === "crowfoot_many" &&
         persisted.heads[1] === "crowfoot_many" &&
         persisted.bound,
       JSON.stringify(persisted),
     );
     await deleteBoard(REL_BOARD);
-
     // Excalidraw 0.18 still registers window.unload; Chrome 158 reports the
     // deprecation as a console error even though our app uses pagehide instead.
     const unloadNoise = /Permissions policy violation: unload is not allowed/;

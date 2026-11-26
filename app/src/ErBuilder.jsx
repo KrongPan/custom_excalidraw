@@ -13,7 +13,7 @@ function clamp(value, [lo, hi], fallback) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-export default function ErBuilder({ open, onClose, selected, onUpdate }) {
+export default function ErBuilder({ open, onClose, selected, picks = [], onInsert, onConnect, onUpdate }) {
   const [title, setTitle] = useState("Classname");
   const [fields, setFields] = useState(DEFAULT_FIELDS);
   const [methods, setMethods] = useState(DEFAULT_METHODS);
@@ -65,10 +65,29 @@ export default function ErBuilder({ open, onClose, selected, onUpdate }) {
       </div>
 
       <div className="panel-body">
+        <div className="row">
+          <button type="button" className="btn small grow" onClick={onInsert} disabled={!onInsert}>
+            + class ใหม่
+          </button>
+          <button
+            type="button"
+            className="btn small grow"
+            onClick={onConnect}
+            disabled={picks.length !== 2 || !onConnect}
+            title={
+              picks.length === 2
+                ? `เชื่อม ${picks[0].title} → ${picks[1].title}`
+                : "เลือก 2 class บนกระดานก่อน"
+            }
+          >
+            เชื่อม 2 class
+          </button>
+        </div>
+
         {!selected ? (
           <p className="hint">
-            กดปุ่ม ER บน toolbar เพื่อวาง class กลางจอ แล้วเลือก class เพื่อแก้ชื่อ,
-            fields และ methods ที่นี่
+            เครื่องมือ ER แยกจากตาราง: `+ class ใหม่` วาง class กลางจอ, เลือก class
+            เพื่อแก้ชื่อ/fields/methods, เลือกสอง class แล้ว `เชื่อม 2 class` เพื่อลากเส้นความสัมพันธ์
           </p>
         ) : (
           <>

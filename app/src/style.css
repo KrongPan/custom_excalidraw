@@ -1128,26 +1128,30 @@ code {
   }
 }
 
-/* ------------------------------------------------- table relation overlays */
+/* ------------------------------------------------------ grid grow handle */
 
-.table-hover-arrows {
+/* The `+` that rides the bottom-right corner of the table under the pointer:
+   it grows that table in place (a row or a column), never clones it. */
+.grid-add {
   position: absolute;
-  inset: 0;
-  z-index: 7;
+  top: 0;
+  left: 0;
+  z-index: 8;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   pointer-events: none;
-  overflow: hidden;
   opacity: 0;
   visibility: hidden;
   transition: opacity 120ms ease, visibility 120ms ease;
 }
 
-.table-hover-arrows.visible {
+.grid-add.visible {
   opacity: 1;
   visibility: visible;
 }
 
-.table-hover-arrow {
-  position: absolute;
+.grid-add-btn {
   width: 24px;
   height: 24px;
   display: grid;
@@ -1162,24 +1166,64 @@ code {
   color: var(--ink);
   cursor: pointer;
   pointer-events: none;
-  transform: translate(-50%, -50%);
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
 
-.table-hover-arrows.visible .table-hover-arrow {
+.grid-add.visible .grid-add-btn,
+.grid-add.open {
   pointer-events: auto;
 }
 
-.table-hover-arrow:hover {
+.grid-add-btn:hover {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  transform: translate(-50%, -50%) scale(1.08);
+  transform: scale(1.08);
 }
 
-.table-hover-arrow:focus-visible {
+.grid-add-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.grid-add.open .grid-add-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.grid-add-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--glass-line);
+  border-radius: 10px;
+  background: var(--frost);
+  box-shadow: var(--float-shadow);
+  color: var(--ink);
+  font-size: 12.5px;
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  pointer-events: auto;
+}
+
+.grid-add-row {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.grid-add-row:hover,
+.grid-add-row:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent);
+  outline: none;
 }
 
 .relation-panel {
@@ -1367,8 +1411,8 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .table-hover-arrows,
-  .table-hover-arrow,
+  .grid-add,
+  .grid-add-btn,
   .relation-option,
   .relation-waypoint,
   .relation-waypoint-add {
