@@ -1,25 +1,27 @@
 #!/usr/bin/env node
 /**
- * Catalog check for the groups (หมวดหมู่) UI and the dark/light theme.
+ * Catalog check for the multi-group (หมวดหมู่) UI and the dark/light theme.
  *
  * Builds a throwaway catalogue from three scenes, serves it from a stub API that
- * implements the documented groups contract, and drives headless Chrome over CDP
- * to prove the behaviours the backend worker has to support:
+ * implements the documented multi-membership contract, and drives headless
+ * Chrome over CDP to prove the behaviours the backend worker has to support:
  *
- *   - group bar: "ทั้งหมด" + one chip per group (name + count) + "+ หมวดใหม่"
- *   - the grid is split into one section per group plus "ไม่มีหมวดหมู่"
- *   - a chip filters the grid, search (#q) still hides cards and empty sections
- *   - create / rename / delete a group through the dialogs (POST/PATCH/DELETE)
- *   - the per-card select moves a board (PATCH /api/boards/:id/meta {groupId})
- *   - deleting a group moves its boards back to ungrouped
- *   - the theme toggle flips <html data-theme>, survives a reload, is applied
- *     before the body exists (no flash) and stays readable in both themes
+ *   - a board can be filed under several groups at once (groupIds: string[])
+ *   - the grid repeats that board as a card in every group's section, and only
+ *     in "ไม่มีหมวดหมู่" when it belongs to none
+ *   - the per-card trigger (button.card-group) opens a multi-select popover;
+ *     one tick sends one PATCH {groupIds} and re-renders, keeping the menu open
+ *   - a 404 from that PATCH reverts the checkbox and says so
+ *   - a chip filters to its own section; search works across duplicated cards
+ *   - create / rename / delete a group, including boards in several groups
+ *   - legacy servers (groupId only, or no inline membership at all), a missing
+ *     /api/groups, the 393px layout, the theme toggle and its no-flash head script
  *
  * Usage: node scripts/test-catalog-groups.mjs
  * Needs: node 22+ (global WebSocket), a local Chrome. Exits non-zero on failure.
  * Screenshots land in /tmp/catalog-groups (override with OUT_DIR).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -190,23 +192,29 @@ const SEEDS = [
 
 const G1 = "grp_aa11bb22";
 const G2 = "grp_cc33dd44";
-const G3 = "grp_ee55ff66"; // created by the UI during the run
-const G4 = "grp_1234abcd"; // created by the UI during the run
 
 /* ------------------------------------------------------------ stub server */
 
 function createStub(siteDir, slugs) {
   const state = {
     log: [],
-    inlineGroupId: true, // merged backend: every board carries groupId
+    // how /api/boards carries membership:
+    //   inline = groupIds + groupId (merged backend)
+    //   legacy = groupId only (an older backend)
+    //   none   = neither (the per-card meta fallback has to do the work)
+    mode: "inline",
+    // one-shot 404 on PATCH /api/boards/:id/meta, standing in for an unknown id
+    rejectMetaOnce: false,
+    groupsDisabled: false,
     groups: [
       { id: G1, name: "ลูกค้า", color: "violet", createdAt: "2026-11-01T09:00:00.000Z", updatedAt: "2026-11-01T09:00:00.000Z" },
       { id: G2, name: "งานภายใน", color: "teal", createdAt: "2026-11-02T09:00:00.000Z", updatedAt: "2026-11-02T09:00:00.000Z" },
     ],
+    // alpha is deliberately in two groups, beta in one, gamma in none
     membership: new Map([
-      [slugs[0], G1],
-      [slugs[1], G2],
-      [slugs[2], ""],
+      [slugs[0], [G1, G2]],
+      [slugs[1], [G1]],
+      [slugs[2], []],
     ]),
     boards: new Map(
       slugs.map((slug, index) => [
@@ -224,12 +232,17 @@ function createStub(siteDir, slugs) {
     nextId: 0,
   };
 
+  const idsOf = (slug) => (state.membership.get(slug) || []).slice();
   const countOf = (groupId) => {
     let n = 0;
-    for (const value of state.membership.values()) if (value === groupId) n += 1;
+    for (const ids of state.membership.values()) if (ids.includes(groupId)) n += 1;
     return n;
   };
   const groupJson = (group) => ({ ...group, count: countOf(group.id) });
+  const membershipJson = (slug) => {
+    const ids = idsOf(slug);
+    return { groupId: ids[0] || null, groupIds: ids };
+  };
   const nameTaken = (name, exceptId) =>
     state.groups.some(
       (group) => group.id !== exceptId && group.name.toLowerCase() === name.toLowerCase(),
@@ -304,9 +317,8 @@ function createStub(siteDir, slugs) {
             bytes: board.bytes,
             elements: board.elements,
           };
-          // the documented contract keeps membership out of this list; the flip
-          // proves the page also copes when a server does include it
-          if (state.inlineGroupId) out.groupId = state.membership.get(board.id) || null;
+          if (state.mode === "inline") Object.assign(out, membershipJson(board.id));
+          else if (state.mode === "legacy") out.groupId = idsOf(board.id)[0] || null;
           return out;
         });
         return json(res, 200, { boards });
@@ -316,33 +328,47 @@ function createStub(siteDir, slugs) {
         const id = boardMeta[1];
         const board = state.boards.get(id);
         if (!board) return json(res, 404, { error: "unknown board" });
-        const groupId = state.membership.get(id) || null;
         if (req.method === "GET") {
           return json(res, 200, {
             id,
             title: board.title,
             subtitle: board.subtitle,
-            groupId,
+            ...membershipJson(id),
             updatedAt: new Date(board.updated).toISOString(),
           });
         }
         if (req.method === "PATCH") {
           if (!parsed || typeof parsed !== "object") return json(res, 400, { error: "bad body" });
+          if (state.rejectMetaOnce) {
+            state.rejectMetaOnce = false;
+            return json(res, 404, { error: "unknown group" });
+          }
           if (typeof parsed.title === "string") board.title = parsed.title.slice(0, 120);
           if (typeof parsed.subtitle === "string") board.subtitle = parsed.subtitle.slice(0, 120);
-          if ("groupId" in parsed) {
+          if (Object.prototype.hasOwnProperty.call(parsed, "groupIds")) {
+            if (!Array.isArray(parsed.groupIds)) return json(res, 400, { error: "groupIds must be an array" });
+            const next = [];
+            for (const groupId of parsed.groupIds) {
+              if (typeof groupId !== "string" || !state.groups.some((group) => group.id === groupId)) {
+                // matches the documented contract: an unknown id is a 404
+                return json(res, 404, { error: "unknown group" });
+              }
+              if (!next.includes(groupId)) next.push(groupId);
+            }
+            state.membership.set(id, next);
+          } else if (Object.prototype.hasOwnProperty.call(parsed, "groupId")) {
             const next = parsed.groupId;
-            if (next === null || next === "") state.membership.delete(id);
-            else if (typeof next === "string" && state.groups.some((g) => g.id === next)) {
-              state.membership.set(id, next);
-            } else return json(res, 400, { error: "unknown group" });
+            if (next === null || next === "") state.membership.set(id, []);
+            else if (typeof next === "string" && state.groups.some((group) => group.id === next)) {
+              state.membership.set(id, [next]);
+            } else return json(res, 404, { error: "unknown group" });
           }
           board.updated = Date.now();
           return json(res, 200, {
             id,
             title: board.title,
             subtitle: board.subtitle,
-            groupId: state.membership.get(id) || null,
+            ...membershipJson(id),
           });
         }
         return json(res, 405, { error: "method" });
@@ -367,7 +393,7 @@ function createStub(siteDir, slugs) {
         if (!name || name.length > 60) return json(res, 400, { error: "bad name" });
         if (nameTaken(name)) return json(res, 409, { error: "duplicate" });
         const group = {
-          id: `grp_${(0x10000000 + (state.nextId += 1)).toString(16)}${G3.slice(4, 8)}`.slice(0, 12),
+          id: `grp_${(0x10000000 + (state.nextId += 1)).toString(16)}${G1.slice(4, 8)}`.slice(0, 12),
           name,
           color,
           createdAt: new Date().toISOString(),
@@ -391,10 +417,11 @@ function createStub(siteDir, slugs) {
           return json(res, 200, { group: groupJson(group) });
         }
         if (req.method === "DELETE") {
+          // a board in several groups only loses this one membership
           const moved = countOf(id);
           state.groups = state.groups.filter((item) => item.id !== id);
-          for (const [boardId, groupId] of [...state.membership.entries()]) {
-            if (groupId === id) state.membership.delete(boardId);
+          for (const [boardId, ids] of [...state.membership.entries()]) {
+            state.membership.set(boardId, ids.filter((groupId) => groupId !== id));
           }
           return json(res, 200, { deleted: id, moved });
         }
@@ -612,85 +639,188 @@ async function freePort() {
     });
   });
 }
+/* --------------------------------------------------------------- helpers */
 
-/* ------------------------------------------------------------------- main */
+/* Injected into every document before the page's own script runs: a tiny
+   read-only view of the sections, chips and group menus, so the checks below
+   stay one line each instead of repeating DOM walking. */
+const HELPERS = `
+  window.__t = {
+    text: function (selector) {
+      var el = document.querySelector(selector);
+      return el ? el.textContent.replace(/\\s+/g, " ").trim() : null;
+    },
+    counter: function () { return window.__t.text("#count"); },
+    emptyState: function () {
+      var el = document.getElementById("empty");
+      return el ? { hidden: el.hidden, text: el.textContent.trim() } : null;
+    },
+    toast: function () {
+      var el = document.getElementById("toast");
+      return el ? { hidden: el.hidden, text: el.textContent.trim(), on: el.classList.contains("on") } : null;
+    },
+    theme: function () {
+      var btn = document.getElementById("theme-toggle");
+      var glyph = btn && btn.querySelector(".theme-glyph");
+      var stored = null;
+      try { stored = localStorage.getItem("boards-theme"); } catch (err) {}
+      return {
+        attr: document.documentElement.getAttribute("data-theme"),
+        glyph: glyph ? glyph.textContent.trim() : null,
+        stored: stored,
+        label: btn ? btn.getAttribute("aria-label") : null,
+      };
+    },
+    sections: function () {
+      return Array.prototype.map.call(
+        document.querySelectorAll("#sections .board-section"),
+        function (section) { return window.__t.section(section.dataset.group); },
+      );
+    },
+    keys: function () {
+      return Array.prototype.map.call(
+        document.querySelectorAll("#sections .board-section"),
+        function (section) { return section.dataset.group; },
+      );
+    },
+    section: function (key) {
+      var section = document.querySelector('.board-section[data-group="' + key + '"]');
+      if (!section) return null;
+      var head = section.querySelector(".sect-head");
+      var grid = section.querySelector(".grid");
+      var cards = Array.prototype.slice.call(section.querySelectorAll(".card"));
+      var slugs = cards.map(function (card) { return card.dataset.slug; });
+      var unique = slugs.filter(function (slug, index) { return slugs.indexOf(slug) === index; });
+      var dot = head ? head.querySelector(".dot") : null;
+      var toggle = head ? head.querySelector(".sect-toggle") : null;
+      var countEl = head ? head.querySelector(".sect-count") : null;
+      return {
+        key: key,
+        name: head ? (head.querySelector(".sect-name") || {}).textContent : null,
+        count: countEl ? Number(countEl.textContent.replace(/[^0-9]/g, "")) : null,
+        cards: slugs,
+        unique: unique,
+        hidden: section.hidden,
+        collapsed: section.dataset.collapsed,
+        gridId: grid ? grid.id : null,
+        gridDisplay: grid ? getComputedStyle(grid).display : null,
+        dot: dot ? dot.className : null,
+        canRename: !!section.querySelector('[data-act="group-rename"]'),
+        canDelete: !!section.querySelector('[data-act="group-del"]'),
+        canToggle: !!toggle,
+        toggleExpanded: toggle ? toggle.getAttribute("aria-expanded") : null,
+        rowCount: section.querySelectorAll(".sect-head").length,
+      };
+    },
+    chips: function () {
+      return Array.prototype.map.call(
+        document.querySelectorAll("#group-chips .chip"),
+        function (chip) {
+          var dot = chip.querySelector(".dot");
+          var n = chip.querySelector(".n");
+          return {
+            key: chip.dataset.group,
+            label: chip.textContent.replace(/\\s+/g, " ").trim(),
+            n: n ? n.textContent.trim() : null,
+            pressed: chip.getAttribute("aria-pressed"),
+            dot: dot ? dot.className : null,
+          };
+        },
+      );
+    },
+    searchOn: function () {
+      var box = document.getElementById("sections");
+      return !!box && box.classList.contains("searching");
+    },
+    copies: function (slug) {
+      return Array.prototype.map.call(
+        document.querySelectorAll('.card[data-slug="' + slug + '"]'),
+        function (card) { return window.__t.card(card); },
+      );
+    },
+    card: function (card) {
+      var btn = card.querySelector("button.card-group");
+      var menu = card.querySelector(".group-menu");
+      var boxes = menu ? Array.prototype.slice.call(menu.querySelectorAll('input[type="checkbox"]')) : [];
+      return {
+        slug: card.dataset.slug,
+        section: card.dataset.section || "",
+        label: btn ? (btn.querySelector(".lbl") || {}).textContent : null,
+        expanded: btn ? btn.getAttribute("aria-expanded") : null,
+        hasPopup: btn ? btn.getAttribute("aria-haspopup") : null,
+        pickHidden: card.querySelector(".group-pick") ? card.querySelector(".group-pick").hidden : null,
+        menuHidden: menu ? menu.hidden : null,
+        boxes: boxes.map(function (box) { return box.value; }),
+        checked: boxes.filter(function (box) { return box.checked; }).map(function (box) { return box.value; }),
+        clear: !!menu.querySelector(".group-clear"),
+        clearText: menu.querySelector(".group-clear") ? menu.querySelector(".group-clear").textContent.trim() : null,
+      };
+    },
+    one: function (slug, key) {
+      var card = document.querySelector(
+        '.board-section[data-group="' + key + '"] .card[data-slug="' + slug + '"]',
+      );
+      return card ? window.__t.card(card) : null;
+    },
+    visibleMenus: function () {
+      return Array.prototype.filter
+        .call(document.querySelectorAll(".card .group-menu"), function (menu) { return !menu.hidden; })
+        .map(function (menu) {
+          var card = menu.closest(".card");
+          return { slug: card.dataset.slug, section: card.dataset.section || "" };
+        });
+    },
+    menuBox: function (slug) {
+      var menu = Array.prototype.filter
+        .call(document.querySelectorAll('.card[data-slug="' + slug + '"] .group-menu'), function (m) { return !m.hidden; })[0];
+      if (!menu) return null;
+      var card = menu.closest(".card").getBoundingClientRect();
+      var box = menu.getBoundingClientRect();
+      return {
+        card: { left: card.left, right: card.right, top: card.top, bottom: card.bottom, width: card.width, height: card.height },
+        menu: { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height },
+      };
+    },
+    overflow: function () {
+      var el = document.documentElement;
+      return { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, scrollHeight: el.scrollHeight };
+    },
+    focused: function () {
+      var el = document.activeElement;
+      if (!el) return null;
+      return {
+        tag: el.tagName.toLowerCase(),
+        cls: String(el.className || ""),
+        slug: el.dataset ? (el.dataset.slug || el.dataset.group || "") : "",
+      };
+    },
+    modal: function (id) {
+      var el = document.getElementById(id);
+      return el ? { hidden: el.hidden } : null;
+    },
+    note: function (id) {
+      var el = document.getElementById(id);
+      return el ? { hidden: el.hidden, text: el.textContent.trim() } : null;
+    },
+    focusVisible: function (selector) {
+      var el = document.querySelector(selector);
+      if (!el) return null;
+      el.focus();
+      var style = getComputedStyle(el);
+      return { outline: style.outlineStyle, width: style.outlineWidth };
+    },
+  };
+`;
 
-async function main() {
-  if (typeof WebSocket !== "function") {
-    throw new Error("this check needs node 22+ (global WebSocket)");
-  }
-  if (!existsSync(CHROME)) throw new Error(`chrome not found at ${CHROME} (set CHROME)`);
-  await mkdir(OUT, { recursive: true });
-
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "catalog-groups-"));
-  const scenesDir = path.join(tmp, "scenes");
-  const siteDir = path.join(tmp, "site");
-  const profile = path.join(tmp, "chrome");
-
-  /* --- scenes + previews, then the real build -------------------------- */
-  for (const [index, seed] of SEEDS.entries()) {
-    const dir = path.join(scenesDir, seed.id);
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      path.join(dir, "scene.excalidraw"),
-      JSON.stringify({
-        type: "excalidraw",
-        version: 2,
-        source: "test-catalog-groups",
-        elements: [{ id: `rect-${index}`, type: "rectangle", x: 10, y: 10, width: 120, height: 80 }],
-        appState: { viewBackgroundColor: "#ffffff" },
-        files: {},
-      }),
-    );
-    await writeFile(
-      path.join(dir, "meta.json"),
-      JSON.stringify({ title: seed.title, subtitle: seed.subtitle }, null, 2),
-    );
-  }
-  await mkdir(path.join(siteDir, "thumbs"), { recursive: true });
-  for (const [index, seed] of SEEDS.entries()) {
-    const hue = [212, 168, 300][index];
-    await writeFile(
-      path.join(siteDir, "thumbs", `${seed.id}.png`),
-      encodePng(320, 200, (x, y) => {
-        const t = (x / 320) * 0.6 + (y / 200) * 0.4;
-        const clamp = (value) => Math.max(0, Math.min(255, Math.round(value)));
-        return [
-          clamp(210 - t * 90 - index * 8),
-          clamp(220 - t * 70 - hue * 0.08),
-          clamp(250 - t * 45 + index * 4),
-        ];
-      }),
-    );
-  }
-
-  const buildOut = execFileSync(process.execPath, ["gallery/build.mjs", "--no-render"], {
-    cwd: ROOT,
-    env: { ...process.env, SCENES_DIR: scenesDir, SITE_DIR: siteDir },
-    encoding: "utf8",
-  });
-  check("build --no-render prints the board count", /\b3 board\(s\) → /.test(buildOut), buildOut.trim().split("\n").pop());
-  check("build produced previews for every card", /without preview/.test(buildOut) === false, "no 'without preview' note");
-
-  const manifest = JSON.parse(await readFile(path.join(siteDir, "manifest.json"), "utf8"));
-  // the catalogue sorts newest-first, so the manifest order is not the folder
-  // order; the fixtures are addressed by slug from here on
-  const slugs = SEEDS.map((seed) => seed.id);
-  const built = manifest.boards.map((board) => board.id);
-  check(
-    "build lists one manifest entry per scene",
-    built.length === 3 && slugs.every((slug) => built.includes(slug)),
-    built.join(", "),
-  );
-
-  const stub = createStub(siteDir, slugs);
-  await new Promise((resolve) => stub.server.listen(0, "127.0.0.1", resolve));
-  const base = `http://127.0.0.1:${stub.server.address().port}`;
-
-  /* --- chrome ---------------------------------------------------------- */
+/**
+ * Launch headless Chrome on a free port and wait for the DevTools endpoint.
+ * about:blank first: opening the catalogue straight from argv can close the
+ * page socket before the harness attaches.
+ */
+async function launchChrome() {
   const port = await freePort();
-  const { spawn } = await import("node:child_process");
-  const browser = spawn(
+  const profile = await mkdtemp(path.join(os.tmpdir(), "catalog-groups-profile-"));
+  const child = spawn(
     CHROME,
     [
       "--headless=new",
@@ -700,789 +830,739 @@ async function main() {
       "--hide-scrollbars",
       "--no-first-run",
       "--no-default-browser-check",
-      `--remote-debugging-port=${port}`,
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-features=Translate,BackForwardCache",
       `--user-data-dir=${profile}`,
+      `--remote-debugging-port=${port}`,
       "--window-size=1440,900",
       "about:blank",
     ],
     { stdio: "ignore" },
   );
-
-  let cdp = null;
-  const cleanup = async () => {
+  const cleanup = () => {
     try {
-      browser.kill("SIGKILL");
+      child.kill("SIGKILL");
     } catch {
       /* already gone */
     }
-    await new Promise((resolve) => stub.server.close(resolve));
-    await rm(tmp, { recursive: true, force: true });
-  };
-
-  try {
-    let targets = null;
-    for (let i = 0; i < 120; i += 1) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-        targets = await response.json();
-        if (targets.length) break;
-      } catch {
-        /* chrome still booting */
-      }
-      await sleep(100);
+    try {
+      rm(profile, { recursive: true, force: true });
+    } catch {
+      /* windows locks the profile */
     }
-    const page = targets?.find((target) => target.type === "page");
-    if (!page) throw new Error("headless Chrome exposed no page target");
+  };
+  process.on("exit", cleanup);
+  const deadline = Date.now() + 20000;
+  let targets = null;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+      if (res.ok) {
+        targets = await res.json();
+        if (targets.some((target) => target.type === "page" && target.webSocketDebuggerUrl)) break;
+      }
+    } catch {
+      /* not listening yet */
+    }
+    await sleep(120);
+  }
+  if (!targets) throw new Error("Chrome did not open a DevTools endpoint");
+  const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
+  if (!page) throw new Error("Chrome has no page target");
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", reject, { once: true });
+  });
+  return { ws, port, kill: () => { try { child.kill("SIGKILL"); } catch {} } };
+}
 
-    const ws = new WebSocket(page.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      ws.addEventListener("open", resolve, { once: true });
-      ws.addEventListener("error", reject, { once: true });
+async function main() {
+  await mkdir(OUT, { recursive: true });
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "catalog-groups-"));
+  const scenesDir = path.join(tmp, "scenes");
+  const siteDir = path.join(tmp, "site");
+  await mkdir(path.join(siteDir, "thumbs"), { recursive: true });
+  await mkdir(path.join(siteDir, "scenes"), { recursive: true });
+
+  /* three scenes, each with a preview the build can reuse without rendering */
+  const tints = [
+    [86, 118, 214],
+    [58, 168, 148],
+    [176, 150, 104],
+  ];
+  for (const [index, seed] of SEEDS.entries()) {
+    const dir = path.join(scenesDir, seed.id);
+    await mkdir(dir, { recursive: true });
+    const scene = {
+      type: "excalidraw",
+      version: 2,
+      source: "test-catalog-groups",
+      elements: [],
+      appState: { viewBackgroundColor: "#ffffff" },
+      files: {},
+    };
+    await writeFile(path.join(dir, "scene.excalidraw"), JSON.stringify(scene, null, 2));
+    const [r, g, b] = tints[index];
+    const png = encodePng(360, 220, (x, y) => {
+      const wash = 0.55 + 0.35 * (1 - y / 220);
+      const band = x < 40 || x > 320 ? 1 : 0.92;
+      return [Math.round(r * wash * band), Math.round(g * wash * band), Math.round(b * wash * band)];
     });
-    cdp = new CDP(ws);
+    await writeFile(path.join(siteDir, "thumbs", `${seed.id}.png`), png);
+  }
+
+  /* the catalogue itself: SCENES_DIR/SITE_DIR point it at this throwaway tree */
+  const buildOut = execFileSync(process.execPath, ["gallery/build.mjs", "--no-render"], {
+    cwd: ROOT,
+    env: { ...process.env, SCENES_DIR: scenesDir, SITE_DIR: siteDir },
+    encoding: "utf8",
+  });
+  check("build: catalogue written without rendering", buildOut.includes("building 3 board(s)"), buildOut.trim());
+  const indexHtml = await readFile(path.join(siteDir, "index.html"), "utf8");
+  const cardTags = indexHtml.match(/<article class="card"[^>]*>/g) || [];
+  check(
+    "build: html carries data-slug and data-groups on every card",
+    cardTags.length === 3 &&
+      cardTags.every((tag) => / data-slug="[^"]+"/.test(tag) && / data-groups="[^"]*"/.test(tag)),
+    `${cardTags.length} card tags`,
+  );
+  check("build: html ships the multi-select menu markup, not the old select", indexHtml.includes('class="group-menu"') && indexHtml.includes('aria-haspopup="true"') && !indexHtml.includes("select class=\"card-group\""));
+  const manifest = JSON.parse(await readFile(path.join(siteDir, "manifest.json"), "utf8"));
+  const manifestBoards = Array.isArray(manifest.boards) ? manifest.boards : [];
+  check("build: manifest lists 3 boards with a groupIds array", manifestBoards.length === 3 && manifestBoards.every((board) => Array.isArray(board.groupIds)), `${manifestBoards.length} boards`);
+
+  /* stub API */
+  const stub = createStub(siteDir, SEEDS.map((seed) => seed.id));
+  await new Promise((resolve) => stub.server.listen(0, "127.0.0.1", resolve));
+  const apiPort = stub.server.address().port;
+  const base = `http://127.0.0.1:${apiPort}`;
+
+  const requestLog = () => stub.state.log;
+  const metaWrites = () => requestLog().filter((entry) => entry.method === "PATCH" && /^\/api\/boards\/[^/]+\/meta$/.test(entry.path));
+  const membershipOf = (slug) => (stub.state.membership.get(slug) || []).slice();
+  const settled = (label) => cdp.waitFor(`(__t.keys().length === 3 && __t.sections().every((s) => s.count === s.cards.length))`, { label });
+
+  const chrome = await launchChrome();
+  let cdp;
+  try {
+    cdp = new CDP(chrome.ws);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Log.enable");
-    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-      source: `
-        window.__themeTrace = [];
-        const record = (why, theme) => window.__themeTrace.push({
-          why,
-          theme: theme === undefined ? (document.documentElement && document.documentElement.getAttribute("data-theme")) : theme,
-          bodyExists: !!document.body,
-          readyState: document.readyState,
-        });
-        // the page sets the attribute from a synchronous <head> script: wrap
-        // setAttribute so we can see whether <body> existed at that moment
-        const setAttribute = Element.prototype.setAttribute;
-        Element.prototype.setAttribute = function (name, value) {
-          if (name === "data-theme" && this === document.documentElement) record("setAttribute", String(value));
-          return setAttribute.call(this, name, value);
-        };
-        document.addEventListener("readystatechange", () => record("readystatechange"));
-        requestAnimationFrame(() => record("first-frame"));
-      `,
-    });
-
+    await cdp.send("Page.bringToFront");
+    await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: HELPERS });
     await cdp.viewport(1440, 900);
     await cdp.mediaScheme("light");
+    await cdp.navigate(base + "/index.html");
+    await cdp.waitFor(`typeof __t === "object" && __t.keys().length === 3`, { label: "sections rendered" });
+    await settled("initial sections");
 
-    // membership lands a moment after the first paint (one meta call per card,
-    // or one /api/boards answer), so wait for the sections to settle instead of
-    // reading the chips too early
-    const countsExpr = `[...document.querySelectorAll(".board-section")].map((section) => section.dataset.group + ":" + section.querySelectorAll(".card").length).join("|")`;
-    const waitSettled = (expected, label) =>
-      cdp.waitFor(`${countsExpr} === ${JSON.stringify(expected)}`, { label });
+    /* ------------------------------------------------------------ sections */
+    const keys = await cdp.evaluate("__t.keys()");
+    check("sections: one per group plus __none__, in group order", JSON.stringify(keys) === JSON.stringify([G1, G2, "__none__"]), JSON.stringify(keys));
 
-    await cdp.navigate(`${base}/`);
-    await waitSettled(`${G1}:1|${G2}:1|__none__:1`, "initial sections with their boards");
+    const alphaCopies = await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)})`);
+    check("sections: a board in two groups has two copies, one per section", alphaCopies.length === 2 && alphaCopies.every((copy) => copy.section === G1 || copy.section === G2), JSON.stringify(alphaCopies.map((copy) => copy.section)));
 
-    /* --- 1. chips ------------------------------------------------------ */
-    const chips = await cdp.evaluate(`[...document.querySelectorAll("#group-chips .chip")].map((chip) => ({
-      key: chip.dataset.group,
-      label: chip.textContent.trim().replace(/\\s+/g, " "),
-      count: (chip.querySelector(".n") || {}).textContent,
-      pressed: chip.getAttribute("aria-pressed"),
-      dot: (chip.querySelector(".dot") || {}).className || "",
-    }))`);
-    check(
-      "chip bar: ทั้งหมด + one chip per group",
-      chips.length === 3 && chips[0].key === "all" && chips[0].label.startsWith("ทั้งหมด"),
-      JSON.stringify(chips.map((chip) => chip.label)),
-    );
-    check(
-      "chips carry the per-group counts from the API",
-      chips[1].count === "1" && chips[2].count === "1" && chips[0].count === "3",
-      chips.map((chip) => `${chip.label}`).join(" | "),
-    );
-    check(
-      "group chips show their colour dot and ทั้งหมด is the pressed default",
-      chips[1].dot.includes("violet") && chips[2].dot.includes("teal") && chips[0].pressed === "true",
-      chips.map((chip) => chip.dot.trim()).join(" | "),
-    );
-    check("a + หมวดใหม่ button sits in the group bar", await cdp.evaluate('!!document.querySelector("#group-new") && !document.querySelector("#groupbar").hidden'), "");
+    const g1 = await cdp.evaluate(`__t.section(${JSON.stringify(G1)})`);
+    check("sections: group one shows alpha and beta", JSON.stringify(g1.unique.slice().sort()) === JSON.stringify([SEEDS[0].id, SEEDS[1].id].sort()), JSON.stringify(g1.unique));
+    const g2 = await cdp.evaluate(`__t.section(${JSON.stringify(G2)})`);
+    check("sections: group two shows only alpha", JSON.stringify(g2.unique) === JSON.stringify([SEEDS[0].id]), JSON.stringify(g2.unique));
+    const none = await cdp.evaluate("__t.section('__none__')");
+    check("sections: no-group board sits only in ไม่มีหมวดหมู่", JSON.stringify(none.unique) === JSON.stringify([SEEDS[2].id]), JSON.stringify(none.unique));
+    check("sections: a board in a group is absent from __none__", !none.cards.includes(SEEDS[0].id) && !none.cards.includes(SEEDS[1].id));
+    check("sections: each heading count equals the cards it shows", [g1, g2, none].every((section) => section.count === section.cards.length), `${g1.count}/${g2.count}/${none.count}`);
 
-    /* --- 2. sections --------------------------------------------------- */
-    const sections = await cdp.evaluate(`[...document.querySelectorAll(".board-section")].map((section) => ({
-      key: section.dataset.group,
-      name: (section.querySelector(".sect-name") || {}).textContent || "",
-      dot: (section.querySelector(".sect-head .dot") || {}).className || "",
-      head: !!section.querySelector(".sect-head"),
-      cards: [...section.querySelectorAll(".card")].map((card) => card.dataset.slug),
-      hidden: section.hidden,
-    }))`);
-    check(
-      "grid is split into one section per group plus ไม่มีหมวดหมู่",
-      sections.length === 3 &&
-        sections[0].key === G1 &&
-        sections[1].key === G2 &&
-        sections[2].key === "__none__" &&
-        sections[2].name === "ไม่มีหมวดหมู่",
-      sections.map((section) => `${section.name || "∅"}:${section.cards.join("+") || "-"}`).join(" | "),
-    );
-    check(
-      "each board sits in its group's section",
-      JSON.stringify(sections[0].cards) === JSON.stringify([slugs[0]]) &&
-        JSON.stringify(sections[1].cards) === JSON.stringify([slugs[1]]) &&
-        JSON.stringify(sections[2].cards) === JSON.stringify([slugs[2]]),
-      JSON.stringify(sections.map((section) => section.cards)),
-    );
-    check(
-      "section headings have a colour dot, a name and a count",
-      sections[0].dot.includes("violet") && sections[1].dot.includes("teal") && sections[2].dot.includes("slate"),
-      sections.map((section) => section.dot.trim()).join(" | "),
-    );
+    /* ----------------------------------------------------------------- chips */
+    const chips = await cdp.evaluate("__t.chips()");
+    check("chips: ทั้งหมด shows the board total", chips[0] && chips[0].key === "all" && chips[0].n === "3", JSON.stringify(chips[0]));
+    const chipG1 = chips.find((chip) => chip.key === G1);
+    const chipG2 = chips.find((chip) => chip.key === G2);
+    check("chips: a board in two groups is counted in both", chipG1 && chipG1.n === "2" && chipG2 && chipG2.n === "1", `${chipG1 && chipG1.n}/${chipG2 && chipG2.n}`);
+    check("chips: chip carries the group colour dot", Boolean(chipG1 && chipG1.dot.includes("violet") && chipG2 && chipG2.dot.includes("teal")), `${chipG1 && chipG1.dot} | ${chipG2 && chipG2.dot}`);
 
-    /* --- 3. per-card select -------------------------------------------- */
-    const selects = await cdp.evaluate(`[...document.querySelectorAll(".card")].map((card) => {
-      const pick = card.querySelector(".group-pick");
-      const sel = card.querySelector("select.card-group");
-      return {
-        slug: card.dataset.slug,
-        shown: pick ? !pick.hidden : false,
-        options: sel ? [...sel.options].map((option) => [option.value, option.textContent]) : [],
-        value: sel ? sel.value : null,
-      };
-    })`);
-    check(
-      "every card gets a group select listing ไม่มีหมวดหมู่ + all groups",
-      selects.every((row) => row.shown && row.options.length === 3 && row.options[0][0] === "") &&
-        selects[0].value === G1 &&
-        selects[1].value === G2 &&
-        selects[2].value === "",
-      JSON.stringify(selects.map((row) => [row.slug, row.value, row.options.length])),
-    );
-
-    /* --- 4. chip filtering --------------------------------------------- */
-    await cdp.click(`#group-chips .chip[data-group="${G1}"]`);
-    await sleep(120);
-    const filtered = await cdp.evaluate(`({
-      pressed: [...document.querySelectorAll("#group-chips .chip")].map((chip) => chip.getAttribute("aria-pressed")),
-      visibleSections: [...document.querySelectorAll(".board-section")].filter((section) => !section.hidden).map((section) => section.dataset.group),
-      counter: document.getElementById("count").textContent.trim(),
-    })`);
-    check(
-      "clicking a chip shows only that section",
-      JSON.stringify(filtered.visibleSections) === JSON.stringify([G1]) &&
-        JSON.stringify(filtered.pressed) === JSON.stringify(["false", "true", "false"]),
-      `${filtered.visibleSections.join(",")} · counter=${filtered.counter}`,
-    );
-    check("counter stays honest under a chip filter", filtered.counter === "1 จาก 3", filtered.counter);
-
-    await cdp.click('#group-chips .chip[data-group="all"]');
-    await sleep(120);
-    check(
-      "ทั้งหมด brings every section back",
-      (await cdp.evaluate('[...document.querySelectorAll(".board-section")].filter((section) => !section.hidden).length')) === 3,
-      "3 sections visible",
-    );
-
-    /* --- 5. create a group --------------------------------------------- */
-    const logMark = stub.state.log.length;
-    await cdp.click("#group-new");
-    await cdp.waitFor('!document.getElementById("group-modal").hidden', { label: "create dialog" });
-    check(
-      "create dialog opens with the name focused, empty and violet preselected",
-      await cdp.evaluate(`document.activeElement === document.getElementById("group-name") &&
-        document.getElementById("group-name").value === "" &&
-        document.querySelector('input[name="group-color"]:checked').value === "violet"`),
-      (await cdp.evaluate('document.getElementById("group-modal-title").textContent')),
-    );
-    await cdp.type("ทดสอบหมวดใหม่");
-    await cdp.click('label.swatch input[value="amber"]');
-    await cdp.click("#group-save");
-    await cdp.waitFor('document.querySelectorAll("#group-chips .chip").length === 4', { label: "four chips" });
-    const created = stub.state.log.slice(logMark).filter((entry) => entry.method === "POST" && entry.path === "/api/groups");
-    check(
-      "saving POSTs /api/groups with the name and the picked colour",
-      created.length === 1 && created[0].body.name === "ทดสอบหมวดใหม่" && created[0].body.color === "amber",
-      JSON.stringify(created.map((entry) => entry.body)),
-    );
-    const afterCreate = await cdp.evaluate(`(() => {
-      const chip = [...document.querySelectorAll("#group-chips .chip")].find((item) => item.textContent.includes("ทดสอบหมวดใหม่"));
-      const section = [...document.querySelectorAll(".board-section")].find((item) =>
-        (item.querySelector(".sect-name") || {}).textContent === "ทดสอบหมวดใหม่");
-      return {
-        chip: chip ? { key: chip.dataset.group, dot: chip.querySelector(".dot").className, count: chip.querySelector(".n").textContent } : null,
-        section: section ? { key: section.dataset.group, hidden: section.hidden, cards: section.querySelectorAll(".card").length } : null,
-        chips: document.querySelectorAll("#group-chips .chip").length,
-        sections: document.querySelectorAll(".board-section").length,
-        toast: document.getElementById("toast").textContent,
-      };
-    })()`);
-    check(
-      "the new group appears as a chip and as a (still empty, hidden) section",
-      Boolean(afterCreate.chip && afterCreate.section) &&
-        afterCreate.chip.dot.includes("amber") &&
-        afterCreate.chip.count === "0" &&
-        afterCreate.section.hidden === true &&
-        afterCreate.sections === 4,
-      JSON.stringify(afterCreate),
-    );
-    check("a toast confirms the new group", afterCreate.toast.includes("ทดสอบหมวดใหม่"), afterCreate.toast);
-    const newGroupId = afterCreate.chip.key;
-
-    /* --- 6. rename the group from its section header -------------------- */
-    const patchMark = stub.state.log.length;
-    await cdp.click(`.sect-btn[data-act="group-rename"][data-group="${G1}"]`);
-    await cdp.waitFor('!document.getElementById("group-modal").hidden', { label: "rename dialog" });
-    const renamePrefill = await cdp.evaluate(`({
-      title: document.getElementById("group-modal-title").textContent,
-      value: document.getElementById("group-name").value,
-      color: document.querySelector('input[name="group-color"]:checked').value,
-    })`);
-    check(
-      "แก้ชื่อ opens the same dialog, prefilled with the group's name and colour",
-      renamePrefill.title === "แก้ชื่อหมวด" && renamePrefill.value === "ลูกค้า" && renamePrefill.color === "violet",
-      JSON.stringify(renamePrefill),
-    );
-    await cdp.type("ลูกค้าใหม่");
-    await cdp.click("#group-save");
-    await cdp.waitFor(
-      `[...document.querySelectorAll(".sect-name")].some((el) => el.textContent === "ลูกค้าใหม่")`,
-      { label: "renamed section heading" },
-    );
-    const renamed = stub.state.log.slice(patchMark).filter((entry) => entry.method === "PATCH" && entry.path === `/api/groups/${G1}`);
-    check(
-      "rename PATCHes /api/groups/:id and updates the heading and the chip",
-      renamed.length === 1 &&
-        renamed[0].body.name === "ลูกค้าใหม่" &&
-        (await cdp.evaluate(`(() => {
-          const chip = document.querySelector('#group-chips .chip[data-group="${G1}"]');
-          const section = document.querySelector('.board-section[data-group="${G1}"]');
-          return chip.textContent.includes("ลูกค้าใหม่") && section.querySelector(".sect-name").textContent === "ลูกค้าใหม่";
-        })()`)),
-      JSON.stringify(renamed.map((entry) => entry.body)),
-    );
-
-    /* --- 7. a duplicate name shows the inline 409 error ----------------- */
-    await cdp.click("#group-new");
-    await cdp.waitFor('!document.getElementById("group-modal").hidden', { label: "create dialog again" });
-    await cdp.type("ลูกค้าใหม่");
-    await cdp.click("#group-save");
-    await cdp.waitFor('!document.getElementById("group-note").hidden', { label: "inline error" });
-    const dupNote = await cdp.evaluate('document.getElementById("group-note").textContent');
-    check("a duplicate name is reported inline, dialog stays open", dupNote.includes("มีชื่อหมวดนี้อยู่แล้ว") && (await cdp.evaluate('!document.getElementById("group-modal").hidden')), dupNote);
-    await cdp.click("#group-cancel");
-
-    /* --- 8. move a board with the card select --------------------------- */
-    const moveMark = stub.state.log.length;
-    await cdp.evaluate(`(() => {
-      const card = document.querySelector('.card[data-slug="${slugs[1]}"]');
-      const sel = card.querySelector("select.card-group");
-      sel.value = "${newGroupId}";
-      sel.dispatchEvent(new Event("change", { bubbles: true }));
-    })()`);
-    await cdp.waitFor(
-      `document.querySelector('.board-section[data-group="${newGroupId}"] .card[data-slug="${slugs[1]}"]') !== null`,
-      { label: "card moved into the new section" },
-    );
-    const moved = stub.state.log.slice(moveMark).filter(
-      (entry) => entry.method === "PATCH" && entry.path === `/api/boards/${slugs[1]}/meta`,
-    );
-    check(
-      "changing the card select PATCHes {groupId} and moves the card without reload",
-      moved.length === 1 && moved[0].body.groupId === newGroupId,
-      JSON.stringify(moved.map((entry) => entry.body)),
-    );
-    const afterMove = await cdp.evaluate(`({
-      sections: [...document.querySelectorAll(".board-section")].map((section) => [section.dataset.group, section.hidden, section.querySelectorAll(".card").length]),
-      counts: [...document.querySelectorAll("#group-chips .chip .n")].map((el) => el.textContent),
-      options: [...document.querySelectorAll('.card[data-slug="${slugs[1]}"] select.card-group option')].map((option) => option.value),
-      selectValue: document.querySelector('.card[data-slug="${slugs[1]}"] select.card-group').value,
-    })`);
-    check(
-      "chip counts and the new section follow the move",
-      afterMove.selectValue === newGroupId &&
-        JSON.stringify(afterMove.counts) === JSON.stringify(["3", "1", "0", "1"]),
-      JSON.stringify(afterMove.counts),
-    );
-
-    /* --- 9. delete the group ------------------------------------------- */
-    const delMark = stub.state.log.length;
-    await cdp.click(`.sect-btn[data-act="group-del"][data-group="${newGroupId}"]`);
-    await cdp.waitFor('!document.getElementById("group-del-modal").hidden', { label: "delete-group dialog" });
-    const delText = await cdp.evaluate('document.getElementById("group-del-detail").textContent');
-    check(
-      "delete dialog explains the boards move to ไม่มีหมวดหมู่",
-      delText.includes("ไม่มีหมวดหมู่") && delText.includes("ไม่ถูกลบ"),
-      delText,
-    );
-    await cdp.click("#group-del-confirm");
-    await cdp.waitFor('document.querySelectorAll("#group-chips .chip").length === 3', { label: "chip removed" });
-    const deleted = stub.state.log.slice(delMark).filter(
-      (entry) => entry.method === "DELETE" && entry.path === `/api/groups/${newGroupId}`,
-    );
-    const afterDelete = await cdp.evaluate(`({
-      noneCards: [...document.querySelector('.board-section[data-group="__none__"]').querySelectorAll(".card")].map((card) => card.dataset.slug),
-      sections: document.querySelectorAll(".board-section").length,
-      toast: document.getElementById("toast").textContent,
-    })`);
-    check(
-      "deleting a group DELETEs it and its boards fall back to ไม่มีหมวดหมู่",
-      deleted.length === 1 &&
-        afterDelete.noneCards.includes(slugs[1]) &&
-        afterDelete.sections === 3,
-      `${JSON.stringify(afterDelete.noneCards)} · ${afterDelete.toast}`,
-    );
-
-    /* --- 10. search ----------------------------------------------------- */
-    await cdp.click("#q");
-    await cdp.type("alpha");
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "1 จาก 3"`, { label: "search counter" });
-    const searched = await cdp.evaluate(`({
-      counter: document.getElementById("count").textContent.trim(),
-      visibleCards: [...document.querySelectorAll(".card")].filter((card) => !card.hidden).map((card) => card.dataset.slug),
-      visibleSections: [...document.querySelectorAll(".board-section")].filter((section) => !section.hidden).map((section) => section.dataset.group),
-      emptyHidden: document.getElementById("empty").hidden,
-    })`);
-    check(
-      "search hides non-matching cards and their empty sections",
-      JSON.stringify(searched.visibleCards) === JSON.stringify([slugs[0]]) &&
-        searched.visibleSections.length === 1 &&
-        searched.emptyHidden === true &&
-        searched.counter === "1 จาก 3",
-      JSON.stringify(searched),
-    );
-    await cdp.backspace(5);
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "3 กระดาน"`, { label: "search cleared" });
-    check(
-      "clearing the search brings every card back",
-      (await cdp.evaluate('[...document.querySelectorAll(".card")].filter((card) => !card.hidden).length')) === 3,
-      "3 cards visible",
-    );
-    // a search that matches nothing must keep the counter at 0 of N
-    await cdp.type("zzzz");
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "0 จาก 3"`, { label: "empty search" });
-    check(
-      "a search with no hits shows 0 จาก 3 and the empty note",
-      await cdp.evaluate('!document.getElementById("empty").hidden && document.querySelectorAll(".board-section:not([hidden])").length === 0'),
-      await cdp.evaluate('document.getElementById("empty").textContent'),
-    );
-    await cdp.backspace(4);
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "3 กระดาน"`, { label: "search cleared again" });
-
-    /* --- 10b. collapsible sections -------------------------------------- */
-    const headings = await cdp.evaluate(`[...document.querySelectorAll(".board-section")].map((section) => ({
-      group: section.dataset.group,
-      collapsed: section.dataset.collapsed,
-      toggles: section.querySelectorAll(".sect-toggle").length,
-      expanded: section.querySelector(".sect-toggle")?.getAttribute("aria-expanded"),
-      label: section.querySelector(".sect-toggle")?.getAttribute("aria-label"),
-      grid: getComputedStyle(section.querySelector(".grid")).display,
-      count: section.querySelector(".sect-count")?.textContent,
-    }))`);
-    check(
-      "every group heading carries one collapse chevron",
-      headings.length === 3 && headings.every((row) => row.toggles === 1 && row.collapsed === "0" && row.grid === "grid"),
-      JSON.stringify(headings.map((row) => [row.group, row.toggles, row.collapsed, row.grid])),
-    );
-    check(
-      "the chevron is announced in Thai and starts expanded",
-      headings.every((row) => /^หุบหมวด /.test(row.label || "") && row.expanded === "true"),
-      JSON.stringify(headings.map((row) => row.label)),
-    );
-
-    const foldTarget = headings.find((row) => row.group === G1) || headings[0];
-    await cdp.click(`.board-section[data-group="${foldTarget.group}"] .sect-toggle`);
-    await cdp.waitFor(
-      `document.querySelector('.board-section[data-group="${foldTarget.group}"]').dataset.collapsed === "1"`,
-      { label: "section folded" },
-    );
-    const folded = await cdp.evaluate(`(() => {
-      const section = document.querySelector('.board-section[data-group="${foldTarget.group}"]');
-      return {
-        grid: getComputedStyle(section.querySelector(".grid")).display,
-        expanded: section.querySelector(".sect-toggle").getAttribute("aria-expanded"),
-        title: section.querySelector(".sect-toggle").getAttribute("title"),
-        head: section.querySelector(".sect-head").getBoundingClientRect().height,
-        count: section.querySelector(".sect-count").textContent,
-        others: [...document.querySelectorAll(".board-section")].filter((other) => other !== section).map((other) => getComputedStyle(other.querySelector(".grid")).display),
-        stored: localStorage.getItem("boards-collapsed"),
-      };
-    })()`);
-    check(
-      "a click folds that heading away but keeps it, with its count",
-      folded.grid === "none" && folded.expanded === "false" && folded.head > 0 && folded.count.length > 0,
-      JSON.stringify(folded),
-    );
-    check(
-      "the other headings stay open and the fold is remembered",
-      folded.others.every((display) => display === "grid") && (folded.stored || "").includes(foldTarget.group),
-      `${JSON.stringify(folded.others)} · ${folded.stored}`,
-    );
-
-    // searching must show the hits even inside a folded heading
-    await cdp.click("#q");
-    await cdp.type("alpha");
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "1 จาก 3"`, { label: "search inside folded" });
-    const revealed = await cdp.evaluate(`(() => {
-      const section = document.querySelector('.board-section[data-group="${foldTarget.group}"]');
-      return {
-        searching: document.getElementById("sections").classList.contains("searching"),
-        grid: getComputedStyle(section.querySelector(".grid")).display,
-        hits: [...section.querySelectorAll(".card")].filter((card) => !card.hidden).length,
-      };
-    })()`);
-    check(
-      "a search opens a folded heading to show what it matched",
-      revealed.searching === true && revealed.grid === "grid" && revealed.hits === 1,
-      JSON.stringify(revealed),
-    );
-    await cdp.backspace(5);
-    await cdp.waitFor(`document.getElementById("count").textContent.trim() === "3 กระดาน"`, { label: "search cleared after fold" });
-    check(
-      "clearing the search folds the heading back",
-      (await cdp.evaluate(`getComputedStyle(document.querySelector('.board-section[data-group="${foldTarget.group}"]').querySelector(".grid")).display`)) === "none",
-      "grid display none",
-    );
-
-    await cdp.reload();
-    await waitSettled(`${G1}:1|${G2}:0|__none__:2`, "sections after folded reload");
-    check(
-      "the fold survives a reload",
-      (await cdp.evaluate(`getComputedStyle(document.querySelector('.board-section[data-group="${foldTarget.group}"]').querySelector(".grid")).display`)) === "none",
-      "still folded after reload",
-    );
-    await cdp.click(`.board-section[data-group="${foldTarget.group}"] .sect-toggle`);
-    await cdp.waitFor(`!localStorage.getItem("boards-collapsed") || !JSON.parse(localStorage.getItem("boards-collapsed")).includes("${foldTarget.group}")`, { label: "section reopened" });
-    check(
-      "clicking again opens it and forgets the fold",
-      (await cdp.evaluate(`getComputedStyle(document.querySelector('.board-section[data-group="${foldTarget.group}"]').querySelector(".grid")).display`)) === "grid",
-      "grid display grid",
-    );
-
-    /* --- 11. theme ------------------------------------------------------ */
-    const lightTheme = await cdp.evaluate(`({
-      theme: document.documentElement.getAttribute("data-theme"),
-      stored: localStorage.getItem("boards-theme"),
-      glyph: document.querySelector("#theme-toggle .theme-glyph").textContent,
-      label: document.getElementById("theme-toggle").getAttribute("aria-label"),
-      bg: getComputedStyle(document.documentElement).backgroundColor,
-      bodyColor: getComputedStyle(document.body).color,
-      cardImage: getComputedStyle(document.querySelector(".card")).backgroundImage,
-      chipBg: getComputedStyle(document.querySelector("#group-chips .chip:not([aria-pressed='true'])")).backgroundColor,
-      pressedChipBg: getComputedStyle(document.querySelector('#group-chips .chip[aria-pressed="true"]')).backgroundColor,
-      headBg: getComputedStyle(document.querySelector("header")).backgroundImage,
-      modalBg: getComputedStyle(document.querySelector("#group-modal .modal-card")).backgroundImage,
-      inputBg: getComputedStyle(document.getElementById("q")).backgroundColor,
-      footer: getComputedStyle(document.querySelector("footer")).color,
-    })`);
-    check(
-      "pages default to the OS scheme (light here), with no stored choice yet",
-      lightTheme.theme === "light" && lightTheme.stored === null && lightTheme.glyph === "☾",
-      JSON.stringify(lightTheme),
-    );
-    await cdp.quiet();
-    const lightShot = await cdp.screenshot(path.join(OUT, "01-light-groups.png"));
-    await cdp.click("#group-new");
-    await cdp.waitFor('!document.getElementById("group-modal").hidden', { label: "dialog for the shot" });
-    await cdp.quiet();
-    const modalShot = await cdp.screenshot(path.join(OUT, "02-light-group-dialog.png"));
-    await cdp.click("#group-cancel");
-
-    await cdp.click("#theme-toggle");
-    await cdp.waitFor(`document.documentElement.getAttribute("data-theme") === "dark"`, { label: "dark theme" });
-    await sleep(320); // .chip/.modal backgrounds transition over 120ms
-    const darkTheme = await cdp.evaluate(`({
-      theme: document.documentElement.getAttribute("data-theme"),
-      stored: localStorage.getItem("boards-theme"),
-      glyph: document.querySelector("#theme-toggle .theme-glyph").textContent,
-      label: document.getElementById("theme-toggle").getAttribute("aria-label"),
-      bg: getComputedStyle(document.documentElement).backgroundColor,
-      bodyColor: getComputedStyle(document.body).color,
-      cardImage: getComputedStyle(document.querySelector(".card")).backgroundImage,
-      chipBg: getComputedStyle(document.querySelector("#group-chips .chip:not([aria-pressed='true'])")).backgroundColor,
-      pressedChipBg: getComputedStyle(document.querySelector('#group-chips .chip[aria-pressed="true"]')).backgroundColor,
-      headBg: getComputedStyle(document.querySelector("header")).backgroundImage,
-      modalBg: getComputedStyle(document.querySelector("#group-modal .modal-card")).backgroundImage,
-      inputBg: getComputedStyle(document.getElementById("q")).backgroundColor,
-      footer: getComputedStyle(document.querySelector("footer")).color,
-      bodyShotLum: null,
-    })`);
-    check(
-      "the toggle flips <html data-theme> to dark and stores the choice",
-      darkTheme.theme === "dark" && darkTheme.stored === "dark" && darkTheme.glyph === "☀",
-      `theme=${darkTheme.theme} stored=${darkTheme.stored} label=${darkTheme.label}`,
-    );
-    const repainted = ["bg", "cardImage", "chipBg", "pressedChipBg", "headBg", "modalBg", "inputBg", "footer", "bodyColor"].filter(
-      (key) => lightTheme[key] !== darkTheme[key],
-    );
-    check(
-      "dark theme really repaints the page, header, cards, chips, inputs and dialogs",
-      repainted.length === 9 &&
-        darkTheme.cardImage.includes("rgba(32, 37, 58") &&
-        !darkTheme.cardImage.includes("rgba(255, 255, 255, 0.42") &&
-        darkTheme.inputBg !== "rgb(255, 255, 255)",
-      `repainted ${repainted.join(",")} · card ${lightTheme.cardImage} → ${darkTheme.cardImage}`,
-    );
-    await cdp.quiet();
-    const darkShot = await cdp.screenshot(path.join(OUT, "03-dark-groups.png"));
-    await cdp.click("#group-new");
-    await cdp.waitFor('!document.getElementById("group-modal").hidden', { label: "dark dialog" });
-    await cdp.quiet();
-    const darkModalShot = await cdp.screenshot(path.join(OUT, "04-dark-group-dialog.png"));
-    await cdp.click("#group-cancel");
-
-    /* contrast from computed colours (AA for body text, muted included) */
-    const contrast = await cdp.evaluate(`(() => {
-      const rgb = (value) => (value.match(/[\\d.]+/g) || []).map(Number);
-      const lum = ([r, g, b]) => {
-        const f = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
-        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
-      };
-      const ratio = (fg, bg) => {
-        const [hi, lo] = [lum(rgb(fg)), lum(rgb(bg))].sort((a, b) => b - a);
-        return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
-      };
-      const bg = getComputedStyle(document.documentElement).backgroundColor;
-      const card = document.querySelector(".card");
-      return {
-        bg,
-        body: ratio(getComputedStyle(document.body).color, bg),
-        heading: ratio(getComputedStyle(card.querySelector("h2")).color, bg),
-        muted: ratio(getComputedStyle(card.querySelector(".meta")).color, bg),
-        chip: ratio(getComputedStyle(document.querySelector("#group-chips .chip")).color, bg),
-        footer: ratio(getComputedStyle(document.querySelector("footer")).color, bg),
-        sectName: ratio(getComputedStyle(document.querySelector(".sect-name")).color, bg),
-      };
-    })()`);
-    check(
-      "dark theme keeps every text token above AA (4.5:1) against the page",
-      ["body", "heading", "muted", "chip", "footer", "sectName"].every((key) => contrast[key] >= 4.5),
-      JSON.stringify(contrast),
-    );
-    const darkPng = decodePng(await readFile(darkShot));
-    const darkLum = meanLuminance(darkPng, {
-      x: darkPng.width - 120,
-      y: 160,
-      width: 90,
-      height: 220,
-    });
-    const lightPng = decodePng(await readFile(lightShot));
-    const lightLum = meanLuminance(lightPng, {
-      x: lightPng.width - 120,
-      y: 160,
-      width: 90,
-      height: 220,
-    });
-    check(
-      "the painted page is genuinely dark vs light (mean luminance of a card-free strip)",
-      darkLum < 0.2 && lightLum > 0.5,
-      `dark=${darkLum.toFixed(3)} light=${lightLum.toFixed(3)}`,
-    );
-
-    /* survives a reload + no flash before paint */
-    await cdp.reload();
-    await waitSettled(`${G1}:1|${G2}:0|__none__:2`, "sections after reload");
-    const afterReload = await cdp.evaluate(`({
-      theme: document.documentElement.getAttribute("data-theme"),
-      stored: localStorage.getItem("boards-theme"),
-      trace: window.__themeTrace || [],
-    })`);
-    const firstAttribute = (afterReload.trace || []).find((entry) => entry.theme);
-    check(
-      "the chosen theme survives a reload",
-      afterReload.theme === "dark" && afterReload.stored === "dark",
-      `theme=${afterReload.theme} stored=${afterReload.stored}`,
-    );
-    check(
-      "data-theme is set before <body> exists (no flash of the wrong palette)",
-      Boolean(firstAttribute) && firstAttribute.bodyExists === false,
-      JSON.stringify(firstAttribute || {}),
-    );
-
-    /* layout parity between the two palettes */
-    const geometryDark = await cdp.evaluate(`(() => {
-      const header = document.querySelector("header").getBoundingClientRect();
-      const card = document.querySelector(".card").getBoundingClientRect();
-      return { header: Math.round(header.height), card: Math.round(card.width), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
-    })()`);
-    await cdp.click("#theme-toggle");
-    await cdp.waitFor(`document.documentElement.getAttribute("data-theme") === "light"`, { label: "back to light" });
-    await sleep(320);
-    const geometryLight = await cdp.evaluate(`(() => {
-      const header = document.querySelector("header").getBoundingClientRect();
-      const card = document.querySelector(".card").getBoundingClientRect();
-      return { header: Math.round(header.height), card: Math.round(card.width), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
-    })()`);
-    check(
-      "both themes keep the same layout and never overflow horizontally",
-      geometryDark.header === geometryLight.header &&
-        geometryDark.card === geometryLight.card &&
-        geometryDark.overflow <= 1 &&
-        geometryLight.overflow <= 1,
-      `dark=${JSON.stringify(geometryDark)} light=${JSON.stringify(geometryLight)}`,
-    );
-    check("the light choice is stored as well", (await cdp.evaluate('localStorage.getItem("boards-theme")')) === "light", "");
-
-    /* the OS preference decides when nothing is stored */
-    await cdp.evaluate('localStorage.removeItem("boards-theme")');
-    await cdp.mediaScheme("dark");
-    await cdp.reload();
-    await cdp.waitFor(`document.documentElement.getAttribute("data-theme") === "dark"`, { label: "OS dark default" });
-    check(
-      "with nothing stored the OS preference wins",
-      (await cdp.evaluate('localStorage.getItem("boards-theme")')) === null,
-      "data-theme=dark, storage untouched",
-    );
-    await cdp.mediaScheme("light");
-    await cdp.reload();
-    await cdp.waitFor(`document.documentElement.getAttribute("data-theme") === "light"`, { label: "OS light default" });
-
-    /* --- 12. membership shapes ------------------------------------------ */
-    /* an older backend without groupId on /api/boards still works: one meta call per card */
-    stub.state.inlineGroupId = false;
-    const metaMark = stub.state.log.length;
-    await cdp.reload();
-    await waitSettled(`${G1}:1|${G2}:0|__none__:2`, "sections after meta reload");
-    await sleep(500);
-    const metaCalls = stub.state.log
-      .slice(metaMark)
-      .filter((entry) => entry.method === "GET" && /^\/api\/boards\/[^/]+\/meta$/.test(entry.path));
-    check(
-      "without groupId in /api/boards the page falls back to GET /api/boards/:id/meta per card",
-      metaCalls.length === 3 && JSON.stringify(metaCalls.map((entry) => entry.path).sort()) === JSON.stringify(slugs.map((slug) => `/api/boards/${slug}/meta`).sort()),
-      `${metaCalls.length} meta calls`,
-    );
-
-    /* the merged backend: groupId on every board, so no per-card fetch at all */
-    stub.state.inlineGroupId = true;
-    const inlineMark = stub.state.log.length;
-    await cdp.reload();
-    await waitSettled(`${G1}:1|${G2}:0|__none__:2`, "sections after inline reload");
-    await sleep(400);
-    const inlineSections = await cdp.evaluate(`[...document.querySelectorAll(".board-section")].map((section) => [section.dataset.group, [...section.querySelectorAll(".card")].map((card) => card.dataset.slug)])`);
-    const inlineMetaCalls = stub.state.log
-      .slice(inlineMark)
-      .filter((entry) => entry.method === "GET" && /^\/api\/boards\/[^/]+\/meta$/.test(entry.path)).length;
-    const inlineNulls = stub.state.log.length > 0 ? await cdp.evaluate(`(() => {
-      const shown = [...document.querySelectorAll(".board-section")].filter((section) => !section.hidden).map((section) => section.dataset.group);
-      return { shown, nullCount: [...document.querySelectorAll(".card")].filter((card) => card.dataset.group === "").length };
-    })()`) : null;
-    check(
-      "when /api/boards carries groupId the page skips the per-card meta calls",
-      inlineMetaCalls === 0 &&
-        JSON.stringify(inlineSections) === JSON.stringify([[G1, [slugs[0]]], [G2, []], ["__none__", [slugs[2], slugs[1]]]]),
-      `meta calls=${inlineMetaCalls} sections=${JSON.stringify(inlineSections)} nulls=${JSON.stringify(inlineNulls)}`,
-    );
-
-    /* a backend without the groups API must not break the catalogue */
-    stub.state.groupsDisabled = true;
-    await cdp.reload();
-    await sleep(700);
-    const flat = await cdp.evaluate(`({
-      sections: document.querySelectorAll(".board-section").length,
-      cards: document.querySelectorAll(".card").length,
-      count: document.getElementById("count").textContent,
-      picks: document.querySelectorAll("label.group-pick:not([hidden])").length,
-      bar: document.getElementById("groupbar").hidden,
-      grid: document.getElementById("grid") !== null,
-    })`);
-    check(
-      "a 404 from /api/groups degrades to the old flat grid",
-      flat.sections === 0 && flat.cards === 3 && flat.count === "3 กระดาน" && flat.picks === 0 && flat.bar === true && flat.grid === true,
-      JSON.stringify(flat),
-    );
-    stub.state.groupsDisabled = false;
-
-    /* --- 13. mobile, light + dark -------------------------------------- */
-    await cdp.viewport(393, 852);
-    await cdp.reload();
-    await waitSettled(`${G1}:1|${G2}:0|__none__:2`, "sections on mobile");
-    const mobileLight = await cdp.evaluate(`({
-      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      chipsWrapped: document.getElementById("groupbar").getBoundingClientRect().height > 0,
-      card: Math.round(document.querySelector(".card").getBoundingClientRect().width),
-    })`);
-    await cdp.quiet();
-    const mobileLightShot = await cdp.screenshot(path.join(OUT, "05-mobile-light.png"));
-    await cdp.click("#theme-toggle");
-    await cdp.waitFor(`document.documentElement.getAttribute("data-theme") === "dark"`, { label: "mobile dark" });
-    await sleep(320);
-    const mobileDark = await cdp.evaluate(`({
-      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      card: Math.round(document.querySelector(".card").getBoundingClientRect().width),
-    })`);
-    await cdp.quiet();
-    const mobileDarkShot = await cdp.screenshot(path.join(OUT, "06-mobile-dark.png"));
-    check(
-      "the mobile layout keeps the group bar usable and never scrolls sideways",
-      mobileLight.overflow <= 1 && mobileDark.overflow <= 1 && mobileLight.card === mobileDark.card,
-      `light=${JSON.stringify(mobileLight)} dark=${JSON.stringify(mobileDark)}`,
-    );
-    await cdp.viewport(1440, 900);
-
-    /* --- 14. the untouched card actions still work --------------------- */
-    const titleMark = stub.state.log.length;
-    await cdp.click(`.card[data-slug="${slugs[2]}"] .rename`);
-    await cdp.waitFor(`document.getElementById("rename-modal").hidden === false`, { label: "rename dialog" });
-    await cdp.type("ชื่อใหม่ Gamma");
-    await cdp.click("#rename-save");
-    await cdp.waitFor(`document.querySelector('.card[data-slug="${slugs[2]}"] h2').textContent === "ชื่อใหม่ Gamma"`, { label: "card title updated" });
-    const titlePatch = stub.state.log
-      .slice(titleMark)
-      .filter((entry) => entry.method === "PATCH" && entry.path === `/api/boards/${slugs[2]}/meta`);
-    check(
-      "the existing card rename still PATCHes the title and repaints the heading",
-      titlePatch.length === 1 && titlePatch[0].body.title === "ชื่อใหม่ Gamma",
-      JSON.stringify(titlePatch.map((entry) => entry.body)),
-    );
-
-    const deleteMark = stub.state.log.length;
-    await cdp.click(`.card[data-slug="${slugs[1]}"] .del`);
-    await cdp.waitFor(`document.getElementById("del-modal").hidden === false`, { label: "delete dialog" });
-    await cdp.hold("#del-hold", 1350);
-    await cdp.waitFor(`document.querySelector('.card[data-slug="${slugs[1]}"]') === null`, { label: "card deleted" });
-    const cardDeletes = stub.state.log
-      .slice(deleteMark)
-      .filter((entry) => entry.method === "DELETE" && entry.path === `/api/boards/${slugs[1]}`);
-    const afterCardDelete = await cdp.evaluate(`({
-      count: document.getElementById("count").textContent,
-      sections: [...document.querySelectorAll(".board-section")].filter((s) => !s.hidden).map((s) => s.dataset.group + ":" + s.querySelectorAll(".card").length),
-    })`);
-    check(
-      "the existing hold-to-delete still removes the card, DELETEs it and keeps the rest coherent",
-      cardDeletes.length === 1 && afterCardDelete.count === "2 กระดาน" && JSON.stringify(afterCardDelete.sections) === JSON.stringify([G1 + ":1", "__none__:1"]),
-      `delete=${JSON.stringify(cardDeletes.map((entry) => entry.path))} after=${JSON.stringify(afterCardDelete)}`,
-    );
-
-    /* --- 15. console hygiene ------------------------------------------- */
-    // "Failed to load resource" lines are the 409/404 answers this check
-    // provokes on purpose (duplicate name, unknown group); the page handles
-    // them inline, which the assertions above already cover
-    const errors = cdp.consoleErrors.filter(
-      (line) =>
-        !/Permissions policy violation/i.test(line) &&
-        !/favicon/i.test(line) &&
-        !/Failed to load resource/i.test(line),
-    );
-    check("no console errors or exceptions along the way", errors.length === 0, errors.slice(0, 3).join(" | "));
-
-    /* --- summary -------------------------------------------------------- */
-    console.log("\nshots:");
-    for (const shot of [lightShot, modalShot, darkShot, darkModalShot, mobileLightShot, mobileDarkShot]) {
-      console.log(`  ${shot}`);
+    /* ------------------------------------------------- triggers and labels */
+    const labels = [];
+    for (const [slug, sectionKey] of [
+      [SEEDS[0].id, G1],
+      [SEEDS[0].id, G2],
+      [SEEDS[1].id, G1],
+      [SEEDS[2].id, "__none__"],
+    ]) {
+      labels.push(await cdp.evaluate(`__t.one(${JSON.stringify(slug)}, ${JSON.stringify(sectionKey)})`));
     }
-    console.log(`\ncontrast (dark): ${JSON.stringify(contrast)}`);
-    console.log(`page luminance: light=${lightLum.toFixed(3)} dark=${darkLum.toFixed(3)}`);
-    console.log(`body text: light ${lightTheme.bodyColor} on ${lightTheme.bg} · dark ${darkTheme.bodyColor} on ${darkTheme.bg}`);
-    console.log(`chips  : light ${lightTheme.chipBg} / pressed ${lightTheme.pressedChipBg} · dark ${darkTheme.chipBg} / pressed ${darkTheme.pressedChipBg}`);
-    console.log(`inputs : light ${lightTheme.inputBg} · dark ${darkTheme.inputBg}`);
+    check(
+      "trigger label: 2 groups reads “2 หมวด” on every copy",
+      labels[0].label === "2 หมวด" && labels[1].label === "2 หมวด",
+      `${labels[0].label} | ${labels[1].label}`,
+    );
+    check("trigger label: 1 group reads the group name", labels[2].label === "ลูกค้า", labels[2].label);
+    check("trigger label: no group reads ไม่มีหมวด", labels[3].label === "ไม่มีหมวด", labels[3].label);
+    check(
+      "trigger: every copy is an aria-haspopup button with a closed menu",
+      labels.every((copy) => copy.hasPopup === "true" && copy.menuHidden === true && copy.expanded === "false" && copy.pickHidden === false),
+      JSON.stringify(labels.map((copy) => [copy.hasPopup, copy.menuHidden, copy.expanded, copy.pickHidden])),
+    );
+
+    /* ------------------------------------------------------- opening a menu */
+    const alphaTrigger = `.board-section[data-group="${G1}"] .card[data-slug="${SEEDS[0].id}"] button.card-group`;
+    await cdp.click(alphaTrigger);
+    await cdp.waitFor("__t.visibleMenus().length === 1", { label: "menu opens" });
+    const opened = await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G1)})`);
+    check(
+      "menu: opening lists one checkbox per group and a ล้างหมวด action",
+      JSON.stringify(opened.boxes) === JSON.stringify([G1, G2]) && opened.checked.length === 2 && opened.clear && opened.clearText === "ล้างหมวด",
+      JSON.stringify(opened.boxes),
+    );
+    check("menu: the trigger reports aria-expanded and the menu is visible", opened.expanded === "true" && opened.menuHidden === false);
+    check(
+      "menu: only the copy that was clicked opens",
+      JSON.stringify(await cdp.evaluate("__t.visibleMenus()")) === JSON.stringify([{ slug: SEEDS[0].id, section: G1 }]),
+      JSON.stringify(await cdp.evaluate("__t.visibleMenus()")),
+    );
+    const box = await cdp.evaluate(`__t.menuBox(${JSON.stringify(SEEDS[0].id)})`);
+    check(
+      "menu: the panel stays inside its card (no overflow)",
+      box && box.menu.left >= box.card.left - 1 && box.menu.right <= box.card.right + 1 && box.menu.top >= box.card.top - 1 && box.menu.bottom <= box.card.bottom + 1,
+      box ? `menu ${Math.round(box.menu.left)}..${Math.round(box.menu.right)} card ${Math.round(box.card.left)}..${Math.round(box.card.right)}` : "no box",
+    );
+
+    await cdp.press("Escape", "Escape", 27);
+    await cdp.waitFor("__t.visibleMenus().length === 0", { label: "escape closes menu" });
+    const afterEscape = await cdp.evaluate("__t.focused()");
+    check("menu: Escape closes it and returns focus to the trigger", afterEscape && afterEscape.cls.includes("card-group") && afterEscape.slug === SEEDS[0].id, JSON.stringify(afterEscape));
+
+    const gammaTrigger = `.board-section[data-group="__none__"] .card[data-slug="${SEEDS[2].id}"] button.card-group`;
+    await cdp.click(gammaTrigger);
+    await cdp.waitFor("__t.visibleMenus().length === 1", { label: "second menu opens" });
+    await cdp.click("#count");
+    await cdp.waitFor("__t.visibleMenus().length === 0", { label: "outside click closes menu" });
+    check("menu: an outside click closes it", (await cdp.evaluate("__t.visibleMenus().length")) === 0);
+
+    await cdp.click(gammaTrigger);
+    await cdp.waitFor("__t.visibleMenus().length === 1", { label: "menu reopens" });
+    await cdp.click(alphaTrigger);
+    await cdp.waitFor("__t.visibleMenus().length === 1", { label: "one menu at a time" });
+    const onlyOne = await cdp.evaluate("__t.visibleMenus()");
+    check("menu: opening another card's menu closes the first", onlyOne.length === 1 && onlyOne[0].slug === SEEDS[0].id, JSON.stringify(onlyOne));
+
+    const stillTwo = await cdp.evaluate(
+      `(() => ({ label: __t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G1)}).label }))()`,
+    );
+    check("menu: the open card still reads “2 หมวด”", stillTwo.label === "2 หมวด", stillTwo.label);
+
+    /* screenshots: menu open on a two-group card, light theme */
+    await cdp.quiet();
+    const menuShot = await cdp.screenshot(path.join(OUT, "menu-light.png"));
+    check("shots: menu screenshot captured", existsSync(menuShot), menuShot);
+/* ------------------------------------------------------------ part three */
+
+async function until(predicate, label, timeout = 9000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await sleep(70);
+  }
+  throw new Error(`timeout: ${label}`);
+}
+
+const sectionSel = (key) => `.board-section[data-group="${key}"]`;
+const cardSel = (key, slug) => `${sectionSel(key)} .card[data-slug="${slug}"]`;
+const triggerSel = (key, slug) => `${cardSel(key, slug)} button.card-group`;
+const boxSel = (key, slug, groupId) => `${cardSel(key, slug)} .group-menu input[value="${groupId}"]`;
+
+const visibleRows = () =>
+  cdp.evaluate(`(() => Array.prototype.map.call(document.querySelectorAll(".board-section"), (section) => {
+    const shown = Array.prototype.filter.call(section.querySelectorAll(".card"), (card) => !card.hidden);
+    return { key: section.dataset.group, hidden: section.hidden, shown: shown.map((card) => card.dataset.slug) };
+  }))()`);
+
+const openMenuAt = async (key, slug) => {
+  /* the menu stays open across a tick by design, so opening is idempotent: a
+     second click on an open trigger would close it again. The open menu can
+     still sit on the section the card is leaving, so wait for the card to land. */
+  const openHere = `__t.visibleMenus().length === 1 && __t.visibleMenus()[0].slug === ${JSON.stringify(slug)} && __t.visibleMenus()[0].section === ${JSON.stringify(key)}`;
+  if (await cdp.evaluate(openHere)) return;
+  await cdp.waitFor(`__t.section(${JSON.stringify(key)}).unique.includes(${JSON.stringify(slug)})`, {
+    label: `${slug} drawn in ${key}`,
+  });
+  if (await cdp.evaluate("__t.visibleMenus().length")) {
+    await cdp.press("Escape", "Escape", 27);
+    await cdp.waitFor("__t.visibleMenus().length === 0", { label: "menu closed before reopening" });
+  }
+  await cdp.click(triggerSel(key, slug));
+  await cdp.waitFor(openHere, { label: `menu for ${slug} in ${key}` });
+};
+
+const closeMenus = async () => {
+  if (await cdp.evaluate("__t.visibleMenus().length")) {
+    await cdp.press("Escape", "Escape", 27);
+    await cdp.waitFor("__t.visibleMenus().length === 0", { label: "menus closed" });
+  }
+};
+
+/* focus the field first: clicking a chip moves focus off #q, and a bare
+   Backspace would then go nowhere */
+const clearQuery = async () => {
+  await cdp.click("#q");
+  await cdp.evaluate(`(() => { const input = document.getElementById("q"); input.select(); })()`);
+  await cdp.backspace(1);
+};
+
+/* dialog fields arrive pre-filled (the current group name / board title), and
+   insertText appends at the caret, so clear the field before typing */
+const fillField = async (selector, text) => {
+  await cdp.click(selector);
+  await cdp.evaluate(`(() => { const input = document.querySelector(${JSON.stringify(selector)}); input.select(); })()`);
+  await cdp.backspace(1);
+  await cdp.type(text);
+};
+
+const countBy = (list) => list.reduce((acc, item) => ((acc[item] = (acc[item] || 0) + 1), acc), {});
+
+/* ------------------------------ one tick moves a board into a second group */
+await closeMenus();
+const writesBefore = metaWrites().length;
+await openMenuAt(G1, SEEDS[1].id);
+await cdp.click(boxSel(G1, SEEDS[1].id, G2));
+await until(() => JSON.stringify(membershipOf(SEEDS[1].id)) === JSON.stringify([G1, G2]), "beta membership [G1,G2]");
+await cdp.waitFor(`__t.section(${JSON.stringify(G2)}).unique.includes(${JSON.stringify(SEEDS[1].id)})`, { label: "beta appears in G2" });
+const tickWrites = metaWrites().slice(writesBefore);
+check("tick: one tick sends exactly one PATCH", tickWrites.length === 1, `${tickWrites.length} writes`);
+check(
+  "tick: the PATCH body is { groupIds: [...] } with both ids",
+  tickWrites.length === 1 &&
+    tickWrites[0].body &&
+    JSON.stringify(Object.keys(tickWrites[0].body)) === JSON.stringify(["groupIds"]) &&
+    tickWrites[0].body.groupIds.length === 2 &&
+    tickWrites[0].body.groupIds.includes(G1) &&
+    tickWrites[0].body.groupIds.includes(G2),
+  JSON.stringify(tickWrites[0] && tickWrites[0].body),
+);
+check("tick: the server now holds both ids for the board", JSON.stringify(membershipOf(SEEDS[1].id)) === JSON.stringify([G1, G2]), JSON.stringify(membershipOf(SEEDS[1].id)));
+const betaCopies = await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[1].id)})`);
+check(
+  "tick: the board is now drawn in both sections with the “2 หมวด” label",
+  betaCopies.length === 2 && betaCopies.every((copy) => copy.label === "2 หมวด") &&
+    betaCopies.map((copy) => copy.section).sort().join() === [G1, G2].sort().join(),
+  JSON.stringify(betaCopies.map((copy) => [copy.section, copy.label])),
+);
+const g1AfterTick = await cdp.evaluate(`__t.section(${JSON.stringify(G1)})`);
+const g2AfterTick = await cdp.evaluate(`__t.section(${JSON.stringify(G2)})`);
+const noneAfterTick = await cdp.evaluate("__t.section('__none__')");
+check(
+  "tick: heading counts follow the cards (2/2/1)",
+  g1AfterTick.count === 2 && g2AfterTick.count === 2 && noneAfterTick.count === 1,
+  `${g1AfterTick.count}/${g2AfterTick.count}/${noneAfterTick.count}`,
+);
+check(
+  "tick: the menu stays open on the same board for further toggles",
+  JSON.stringify(await cdp.evaluate("__t.visibleMenus()")).includes(SEEDS[1].id),
+  JSON.stringify(await cdp.evaluate("__t.visibleMenus()")),
+);
+check(
+  "tick: every checkbox of the new member is ticked on both copies",
+  betaCopies.every((copy) => copy.checked.length === 2 && copy.checked.includes(G1) && copy.checked.includes(G2)),
+  JSON.stringify(betaCopies.map((copy) => copy.checked)),
+);
+
+/* ---------------------------- untick one of two leaves the other in place */
+const writesBeforeUntick = metaWrites().length;
+await cdp.click(boxSel(G1, SEEDS[1].id, G2));
+await until(() => JSON.stringify(membershipOf(SEEDS[1].id)) === JSON.stringify([G1]), "beta membership [G1]");
+await cdp.waitFor(`!__t.section(${JSON.stringify(G2)}).unique.includes(${JSON.stringify(SEEDS[1].id)})`, { label: "beta leaves G2" });
+const untickWrites = metaWrites().slice(writesBeforeUntick);
+check(
+  "untick: one PATCH with only the remaining id",
+  untickWrites.length === 1 && JSON.stringify(untickWrites[0].body) === JSON.stringify({ groupIds: [G1] }),
+  JSON.stringify(untickWrites[0] && untickWrites[0].body),
+);
+const betaAlone = await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[1].id)})`);
+check("untick: the card is back in one section and reads the group name", betaAlone.length === 1 && betaAlone[0].section === G1 && betaAlone[0].label === "ลูกค้า", JSON.stringify(betaAlone.map((copy) => [copy.section, copy.label])));
+
+/* ------------------------ the last group: no group board → one group → none */
+await closeMenus();
+await openMenuAt("__none__", SEEDS[2].id);
+check("clear path: a no-group board opens a menu with nothing ticked", (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, "__none__")`)).checked.length === 0);
+await cdp.click(boxSel("__none__", SEEDS[2].id, G2));
+await until(() => JSON.stringify(membershipOf(SEEDS[2].id)) === JSON.stringify([G2]), "gamma membership [G2]");
+await cdp.waitFor(`__t.section(${JSON.stringify(G2)}).unique.includes(${JSON.stringify(SEEDS[2].id)}) && !__t.section("__none__").unique.includes(${JSON.stringify(SEEDS[2].id)})`, { label: "gamma moved to G2" });
+const gammaInG2 = await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, ${JSON.stringify(G2)})`);
+check("tick from none: the board leaves ไม่มีหมวดหมู่ and reads its group name", gammaInG2.label === "งานภายใน" && gammaInG2.checked.join() === G2, JSON.stringify([gammaInG2.label, gammaInG2.checked]));
+
+const writesBeforeEmpty = metaWrites().length;
+await cdp.click(boxSel(G2, SEEDS[2].id, G2));
+await until(() => membershipOf(SEEDS[2].id).length === 0, "gamma membership cleared");
+await cdp.waitFor(`__t.section("__none__").unique.includes(${JSON.stringify(SEEDS[2].id)})`, { label: "gamma back in none" });
+const emptyWrites = metaWrites().slice(writesBeforeEmpty);
+check(
+  "untick the last group: the body carries an empty groupIds array",
+  emptyWrites.length === 1 && JSON.stringify(emptyWrites[0].body) === JSON.stringify({ groupIds: [] }),
+  JSON.stringify(emptyWrites[0] && emptyWrites[0].body),
+);
+const gammaBack = await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, "__none__")`);
+check("untick the last group: the card moves to ไม่มีหมวดหมู่", gammaBack.label === "ไม่มีหมวด" && gammaBack.checked.length === 0, JSON.stringify([gammaBack.label, gammaBack.checked]));
+
+/* ------------------------------------------- ล้างหมวด clears a multi-group card */
+await closeMenus();
+await openMenuAt(G1, SEEDS[0].id);
+await cdp.click(`${cardSel(G1, SEEDS[0].id)} .group-clear`);
+await until(() => membershipOf(SEEDS[0].id).length === 0, "alpha cleared");
+await cdp.waitFor(`__t.section("__none__").unique.includes(${JSON.stringify(SEEDS[0].id)})`, { label: "alpha moved to none" });
+check(
+  "ล้างหมวด: sends groupIds: [] and moves the two-group card to ไม่มีหมวดหมู่",
+  JSON.stringify(membershipOf(SEEDS[0].id)) === "[]" &&
+    !(await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).unique.includes(${JSON.stringify(SEEDS[0].id)})`)),
+  JSON.stringify(membershipOf(SEEDS[0].id)),
+);
+check("ล้างหมวด: the card reads ไม่มีหมวด afterwards", (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, "__none__")`)).label === "ไม่มีหมวด");
+/* put alpha back where the rest of the run expects it */
+await openMenuAt("__none__", SEEDS[0].id);
+await cdp.click(boxSel("__none__", SEEDS[0].id, G1));
+await until(() => JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1]), "alpha back in G1");
+await openMenuAt(G1, SEEDS[0].id);
+await cdp.click(boxSel(G1, SEEDS[0].id, G2));
+await until(() => JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1, G2]), "alpha back in G1+G2");
+await cdp.waitFor(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length === 2`, { label: "alpha two copies again" });
+check("restore: alpha is back in two groups for the rest of the run", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)})`)).length === 2);
+
+/* ----------------------------------------- a rejected PATCH reverts the tick */
+await closeMenus();
+await openMenuAt(G1, SEEDS[0].id);
+const beforeReject = await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G1)})`);
+stub.state.rejectMetaOnce = true;
+await cdp.click(boxSel(G1, SEEDS[0].id, G2));
+await cdp.waitFor(`(__t.toast().text || "").indexOf("ยังไม่ได้บันทึก") >= 0`, { label: "error toast" });
+const afterReject = await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G1)})`);
+const rejectToast = await cdp.evaluate("__t.toast()");
+check("404: an unknown group id keeps the server membership untouched", JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1, G2]), JSON.stringify(membershipOf(SEEDS[0].id)));
+check(
+  "404: the checkbox the person just ticked is reverted",
+  afterReject.checked.sort().join() === beforeReject.checked.sort().join() && afterReject.checked.includes(G2),
+  JSON.stringify(afterReject.checked),
+);
+check("404: an error toast explains the write did not land", rejectToast.hidden === false && rejectToast.text.includes("ไม่พบหมวดหรือกระดานนี้แล้ว"), JSON.stringify(rejectToast));
+check("404: no extra section copy appeared", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)})`)).length === 2);
+
+/* ------------------------------------------------- chip filter with copies */
+await closeMenus();
+await cdp.click(`#group-chips .chip[data-group="${G1}"]`);
+await cdp.waitFor("__t.chips().find((chip) => chip.key === \"all\").pressed === \"false\"", { label: "chip aria state" });
+const chipRows = await visibleRows();
+check(
+  "chip: a group chip shows only that group's section",
+  chipRows.filter((row) => !row.hidden).map((row) => row.key).join() === G1,
+  JSON.stringify(chipRows.map((row) => [row.key, row.hidden])),
+);
+check("chip: the counter reads how many of the total are shown", (await cdp.evaluate("__t.text('#count')")) === "2 จาก 3", await cdp.evaluate("__t.text('#count')"));
+check(
+  "chip: a two-group board still appears once, in its own section",
+  (await cdp.evaluate(`(() => Array.prototype.filter.call(document.querySelectorAll('.card[data-slug="${SEEDS[0].id}"]'), (card) => !card.hidden).length)()`)) === 1,
+);
+await cdp.click(`#group-chips .chip[data-group="${G2}"]`);
+await cdp.waitFor("__t.text('#count') === \"1 จาก 3\"", { label: "G2 chip" });
+check("chip: switching chips re-scopes without duplicating cards", (await cdp.evaluate(`(() => __t.section(${JSON.stringify(G2)}).unique)()`)).length === 1);
+await cdp.click(`#group-chips .chip[data-group="all"]`);
+await cdp.waitFor("__t.text('#count') === \"3 กระดาน\"", { label: "back to all" });
+check("chip: ทั้งหมด restores every section", (await visibleRows()).every((row) => !row.hidden));
+
+/* ------------------------------------------------------- search + copies */
+await cdp.click("#q");
+await cdp.type("alpha");
+await cdp.waitFor("__t.sections().every((section) => section.hidden || section.unique.length === section.cards.length)", { label: "search applied" });
+const searchState = await cdp.evaluate("({ counter: __t.text('#count'), searching: __t.searchOn(), empty: __t.emptyState() })");
+check("search: counts the board once, not once per section", searchState.counter === "1 จาก 3", searchState.counter);
+check("search: sets #sections.searching and keeps the honest empty state hidden", searchState.searching === true && searchState.empty.hidden === true, JSON.stringify(searchState.empty));
+const searchRows = await visibleRows();
+check(
+  "search: a board found in two sections shows one card per section, never twice in one",
+  searchRows.every((row) => row.shown.length === new Set(row.shown).size),
+  JSON.stringify(searchRows.map((row) => row.shown)),
+);
+check(
+  "search: the two copies of the matched board are both visible",
+  (await cdp.evaluate(`(() => Array.prototype.filter.call(document.querySelectorAll('.card[data-slug="${SEEDS[0].id}"]'), (card) => !card.hidden).length)()`)) === 2,
+);
+check("search: non-matching boards are hidden", (await cdp.evaluate(`(() => Array.prototype.filter.call(document.querySelectorAll('.card[data-slug="${SEEDS[1].id}"]'), (card) => !card.hidden).length)()`)) === 0);
+await cdp.click(`#group-chips .chip[data-group="${G1}"]`);
+await cdp.waitFor("__t.text('#count') === \"1 จาก 3\"", { label: "chip and query intersect" });
+const intersect = await visibleRows();
+check(
+  "search ∩ chip: only the chip's section survives, still once",
+  intersect.filter((row) => !row.hidden).map((row) => row.key).join() === G1 &&
+    (intersect.find((row) => row.key === G1) || { shown: [] }).shown.join() === SEEDS[0].id,
+  JSON.stringify(intersect.map((row) => [row.key, row.hidden, row.shown])),
+);
+await clearQuery();
+await cdp.waitFor("__t.text('#count') === \"2 จาก 3\"", { label: "query cleared under chip" });
+await cdp.click(`#group-chips .chip[data-group="all"]`);
+await cdp.waitFor("__t.text('#count') === \"3 กระดาน\"", { label: "chip cleared" });
+check("search: clearing the query leaves the page exactly as before", (await visibleRows()).every((row) => !row.hidden) && (await cdp.evaluate("__t.searchOn()")) === false);
+
+/* -------------------------------------- folding a section that has copies */
+await closeMenus();
+await cdp.click(`${sectionSel(G1)} .sect-toggle`);
+await cdp.waitFor(`__t.section(${JSON.stringify(G1)}).collapsed === "1"`, { label: "G1 folded" });
+const folded = await cdp.evaluate(`__t.section(${JSON.stringify(G1)})`);
+check("fold: the toggle collapses the section and hides its grid", folded.collapsed === "1" && folded.gridDisplay === "none" && folded.toggleExpanded === "false", JSON.stringify([folded.collapsed, folded.gridDisplay]));
+await cdp.click("#q");
+await cdp.type("alpha");
+await cdp.waitFor("__t.searchOn() === true", { label: "searching" });
+check("fold: a search reveals the folded section's cards", (await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).gridDisplay`)) === "grid");
+check("fold: the folded section still holds both of its cards", (await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).cards.length`)) === 2);
+await clearQuery();
+await cdp.waitFor("__t.searchOn() === false", { label: "search cleared" });
+check("fold: clearing the search folds it again", (await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).gridDisplay`)) === "none");
+await cdp.reload();
+await cdp.waitFor(`typeof __t === "object" && __t.keys().length === 3`, { label: "reload after fold" });
+await until(async () => JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1, G2]), "membership after reload");
+await cdp.waitFor(`__t.section(${JSON.stringify(G1)}).collapsed === "1"`, { label: "fold persisted" });
+check("fold: the collapsed section survives a reload", (await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).gridDisplay`)) === "none");
+await cdp.click(`${sectionSel(G1)} .sect-toggle`);
+await cdp.waitFor(`__t.section(${JSON.stringify(G1)}).collapsed === "0"`, { label: "G1 unfolded" });
+check("fold: unfolding shows the grid again", (await cdp.evaluate(`__t.section(${JSON.stringify(G1)}).gridDisplay`)) === "grid");
+
+/* ------------------------------------------------------------ create group */
+await cdp.click("#group-new");
+await cdp.waitFor("document.getElementById('group-modal').hidden === false", { label: "group modal" });
+await cdp.click(`#group-colors input[value="amber"]`);
+await fillField("#group-name", "ทดสอบหมวดใหม่");
+check("create: dialog title and save label switch to the new-group copy", (await cdp.evaluate("__t.text('#group-modal-title')")) === "หมวดใหม่" && (await cdp.evaluate("__t.text('#group-save')")) === "สร้างหมวด");
+const postsBefore = requestLog().filter((entry) => entry.method === "POST" && entry.path === "/api/groups").length;
+await cdp.click("#group-save");
+await cdp.waitFor("__t.keys().length === 4", { label: "four sections" });
+const created = await cdp.evaluate("__t.chips()");
+const g3chip = created[created.length - 1];
+const G3 = g3chip.key;
+const postWrites = requestLog().filter((entry) => entry.method === "POST" && entry.path === "/api/groups").slice(postsBefore);
+check("create: POST carries the name and the picked colour", postWrites.length === 1 && postWrites[0].body.name === "ทดสอบหมวดใหม่" && postWrites[0].body.color === "amber", JSON.stringify(postWrites[0] && postWrites[0].body));
+check("create: the new group gets a section and a chip", G3.startsWith("grp_") && (await cdp.evaluate(`__t.keys()[2] === ${JSON.stringify(G3)}`)) === true, G3);
+check("create: an empty new group shows zero cards in its heading", (await cdp.evaluate(`__t.section(${JSON.stringify(G3)}).count`)) === 0);
+check("create: the dialog closes and a toast confirms", (await cdp.evaluate("__t.modal('group-modal').hidden")) === true && (await cdp.evaluate("__t.toast().text")).includes("ทดสอบหมวดใหม่"));
+check(
+  "create: every menu now offers the third group",
+  (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G2)}).boxes.length`)) === 3,
+  String(await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G2)}).boxes.length`)),
+);
+
+/* ------------------------------ alpha joins the third group: three sections */
+await closeMenus();
+await openMenuAt(G1, SEEDS[0].id);
+await cdp.click(boxSel(G1, SEEDS[0].id, G3));
+await until(() => membershipOf(SEEDS[0].id).includes(G3), "alpha in G3");
+await cdp.waitFor(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length === 3`, { label: "alpha three copies" });
+const threeCopies = await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)})`);
+check("three groups: one card per section, each labelled “3 หมวด”", threeCopies.length === 3 && threeCopies.every((copy) => copy.label === "3 หมวด"), JSON.stringify(threeCopies.map((copy) => copy.section)));
+check("three groups: the section count follows the copies", (await cdp.evaluate(`__t.section(${JSON.stringify(G3)}).count`)) === 1);
+check("three groups: the PATCH keeps all three ids", JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1, G2, G3]), JSON.stringify(membershipOf(SEEDS[0].id)));
+check("three groups: the chip count follows the membership", (await cdp.evaluate(`__t.chips().find((chip) => chip.key === ${JSON.stringify(G3)}).n`)) === "1");
+
+/* put gamma into the new group so delete has a board that leaves for none */
+await closeMenus();
+await openMenuAt("__none__", SEEDS[2].id);
+await cdp.click(boxSel("__none__", SEEDS[2].id, G3));
+await until(() => JSON.stringify(membershipOf(SEEDS[2].id)) === JSON.stringify([G3]), "gamma only in G3");
+await cdp.waitFor(`!__t.section("__none__").unique.includes(${JSON.stringify(SEEDS[2].id)})`, { label: "gamma left none" });
+check("before delete: gamma sits only in the new group", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[2].id)})`)).length === 1 && (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, ${JSON.stringify(G3)}).label`)) === "ทดสอบหมวดใหม่");
+
+/* ------------------------------------------------------------ delete group */
+await closeMenus();
+await cdp.click(`${sectionSel(G3)} [data-act="group-del"]`);
+await cdp.waitFor("__t.modal('group-del-modal').hidden === false", { label: "group delete dialog" });
+const deleteNote = await cdp.evaluate("__t.text('#group-del-detail')");
+check("delete: the dialog counts the boards and explains who moves where", deleteNote.includes("2 ใบ") && deleteNote.includes("ไม่มีหมวดอื่น"), deleteNote);
+await cdp.click("#group-del-confirm");
+await cdp.waitFor(`__t.keys().length === 3 && !__t.keys().includes(${JSON.stringify(G3)})`, { label: "group removed" });
+await cdp.waitFor(`__t.section("__none__").unique.includes(${JSON.stringify(SEEDS[2].id)})`, { label: "gamma to none" });
+const delToast = await cdp.evaluate("__t.toast()");
+check("delete: the multi-group board keeps its other memberships", JSON.stringify(membershipOf(SEEDS[0].id)) === JSON.stringify([G1, G2]), JSON.stringify(membershipOf(SEEDS[0].id)));
+check("delete: the single-group board loses its only group and lands in ไม่มีหมวดหมู่", membershipOf(SEEDS[2].id).length === 0 && (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, "__none__").label`)) === "ไม่มีหมวด");
+check("delete: two cards now, so the copy count follows", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 2);
+check("delete: the toast reports one moved to none and one still in another group", delToast.text.includes("ย้าย 1 ใบไปไม่มีหมวดหมู่") && delToast.text.includes("1 ใบยังอยู่ในหมวดอื่น"), delToast.text);
+
+/* ------------------------------------------------------------ rename group */
+await cdp.click(`${sectionSel(G1)} [data-act="group-rename"]`);
+await cdp.waitFor("__t.modal('group-modal').hidden === false", { label: "rename dialog" });
+await fillField("#group-name", "ลูกค้าใหม่");
+const patchBefore = requestLog().filter((entry) => entry.method === "PATCH" && entry.path === `/api/groups/${G1}`).length;
+await cdp.click("#group-save");
+await cdp.waitFor(`__t.section(${JSON.stringify(G1)}).name === "ลูกค้าใหม่"`, { label: "section renamed" });
+const groupPatch = requestLog().filter((entry) => entry.method === "PATCH" && entry.path === `/api/groups/${G1}`).slice(patchBefore);
+check("rename group: PATCH carries the new name", groupPatch.length === 1 && groupPatch[0].body.name === "ลูกค้าใหม่", JSON.stringify(groupPatch[0] && groupPatch[0].body));
+check("rename group: the section heading and chip follow", (await cdp.evaluate(`__t.chips().find((chip) => chip.key === ${JSON.stringify(G1)}).label`)).includes("ลูกค้าใหม่"));
+check(
+  "rename group: single-group card labels follow the new name",
+  (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[1].id)}, ${JSON.stringify(G1)}).label`)) === "ลูกค้าใหม่",
+  await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[1].id)}, ${JSON.stringify(G1)}).label`),
+);
+
+/* duplicate name: 409 shows the note and keeps the dialog open */
+await cdp.click(`${sectionSel(G2)} [data-act="group-rename"]`);
+await cdp.waitFor("__t.modal('group-modal').hidden === false", { label: "second rename dialog" });
+await fillField("#group-name", "ลูกค้าใหม่");
+await cdp.click("#group-save");
+await cdp.waitFor("__t.note('group-note').hidden === false", { label: "duplicate note" });
+check("duplicate name: the 409 is reported inside the dialog", (await cdp.evaluate("__t.note('group-note').text")).includes("มีชื่อหมวดนี้อยู่แล้ว"));
+check("duplicate name: the dialog stays open for a correction", (await cdp.evaluate("__t.modal('group-modal').hidden")) === false);
+await cdp.click("#group-cancel");
+await cdp.waitFor("__t.modal('group-modal').hidden === true", { label: "dialog closed" });
+
+/* ------------------------------------------- older servers, one shape at a time */
+const caseTail = (label) => `reload (${label})`;
+stub.state.mode = "legacy";
+await cdp.reload();
+await cdp.waitFor(`typeof __t === "object" && __t.keys().length === 3`, { label: caseTail("legacy") });
+await until(async () => (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 1, "legacy single membership");
+check(
+  "legacy server: groupId only still paints one section per board",
+  (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 1 &&
+    (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[0].id)}, ${JSON.stringify(G1)}).label`)) === "ลูกค้าใหม่",
+);
+check("legacy server: a no-group board still lands in ไม่มีหมวดหมู่", (await cdp.evaluate(`__t.one(${JSON.stringify(SEEDS[2].id)}, "__none__").label`)) === "ไม่มีหมวด");
+
+stub.state.mode = "none";
+await cdp.reload();
+await cdp.waitFor(`typeof __t === "object" && __t.keys().length === 3`, { label: caseTail("none") });
+await until(async () => (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 2, "meta fallback restores both groups");
+check("no inline membership: the per-card meta fallback still fills both sections", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).map((copy) => copy.section).sort().join()`)) === [G1, G2].sort().join());
+check("no inline membership: labels and counts survive the fallback", (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)})[0].label`)) === "2 หมวด");
+
+stub.state.mode = "inline";
+stub.state.groupsDisabled = true;
+await cdp.reload();
+await cdp.waitFor(`typeof __t === "object" && document.getElementById('groupbar').hidden === true`, { label: caseTail("no groups api") });
+check("no /api/groups: the page falls back to the flat grid", (await cdp.evaluate("__t.keys().length")) === 0 && (await cdp.evaluate("document.querySelectorAll('#grid > .card').length")) === 3);
+check("no /api/groups: the per-card control is hidden, not broken", (await cdp.evaluate("Array.prototype.every.call(document.querySelectorAll('.group-pick'), (pick) => pick.hidden)")) === true);
+stub.state.groupsDisabled = false;
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: caseTail("groups back") });
+await until(async () => (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 2, "sections back");
+
+/* --------------------------------------------------------------- 393 px */
+await cdp.viewport(393, 852);
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: "mobile sections" });
+await until(async () => (await cdp.evaluate(`__t.copies(${JSON.stringify(SEEDS[0].id)}).length`)) === 2, "mobile membership");
+await closeMenus();
+await openMenuAt(G2, SEEDS[0].id);
+const mobileBox = await cdp.evaluate(`__t.menuBox(${JSON.stringify(SEEDS[0].id)})`);
+check(
+  "393px: the menu opens inside its card",
+  mobileBox && mobileBox.menu.left >= mobileBox.card.left - 1 && mobileBox.menu.right <= mobileBox.card.right + 1 && mobileBox.menu.bottom <= mobileBox.card.bottom + 1 && mobileBox.menu.width > 100,
+  mobileBox ? `menu ${Math.round(mobileBox.menu.left)}..${Math.round(mobileBox.menu.right)} / card ${Math.round(mobileBox.card.left)}..${Math.round(mobileBox.card.right)}` : "no box",
+);
+const mobileOverflow = await cdp.evaluate("__t.overflow()");
+check("393px: the page does not scroll sideways", mobileOverflow.scrollWidth === mobileOverflow.clientWidth, JSON.stringify(mobileOverflow));
+const tap = await cdp.evaluate(
+  `(() => { const r = document.querySelector('${triggerSel(G2, SEEDS[0].id)}').getBoundingClientRect(); return { w: r.width, h: r.height }; })()`,
+);
+check("393px: the trigger is still there, full-width and tappable", tap.w > 120 && tap.h >= 24, JSON.stringify(tap));
+await cdp.quiet();
+const mobileLightShot = await cdp.screenshot(path.join(OUT, "mobile-light.png"));
+check("393px: screenshot captured", existsSync(mobileLightShot), mobileLightShot);
+
+/* ------------------------------------------------------------------ theme */
+await cdp.viewport(1440, 900);
+await cdp.mediaScheme("light");
+await cdp.evaluate("localStorage.removeItem('boards-theme')");
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: "theme baseline" });
+await cdp.quiet();
+const lightShot = await cdp.screenshot(path.join(OUT, "light.png"));
+const lightLum = meanLuminance(decodePng(await readFile(lightShot)), { x: 0, y: 220, width: 70, height: 120 });
+check("theme: a fresh visitor gets the light palette", (await cdp.evaluate("__t.theme().attr")) === "light" && lightLum > 0.5, `lum ${lightLum.toFixed(2)}`);
+check("theme: the toggle shows the moon before switching", (await cdp.evaluate("__t.theme().glyph")) === "☾");
+await cdp.click("#theme-toggle");
+await cdp.waitFor("__t.theme().attr === 'dark'", { label: "dark applied" });
+const darkTheme = await cdp.evaluate("__t.theme()");
+check("theme: clicking stores the choice", darkTheme.stored === "dark" && darkTheme.glyph === "☀", JSON.stringify(darkTheme));
+await cdp.quiet();
+const darkShot = await cdp.screenshot(path.join(OUT, "dark.png"));
+const darkLum = meanLuminance(decodePng(await readFile(darkShot)), { x: 0, y: 220, width: 70, height: 120 });
+check("theme: the dark palette really paints darker", darkLum < 0.2 && lightLum - darkLum > 0.4, `light ${lightLum.toFixed(2)} dark ${darkLum.toFixed(2)}`);
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: "reload with stored dark" });
+check("theme: the stored choice survives a reload", (await cdp.evaluate("__t.theme().attr")) === "dark");
+check("theme: the no-flash head script applies it before css", (await cdp.evaluate("document.documentElement.getAttribute('data-theme')")) === "dark");
+await cdp.mediaScheme("dark");
+await cdp.evaluate("localStorage.removeItem('boards-theme')");
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: "os dark" });
+check("theme: with no stored choice the OS preference wins", (await cdp.evaluate("__t.theme().attr")) === "dark");
+await cdp.quiet();
+const mobileDarkShot = await cdp.screenshot(path.join(OUT, "mobile-dark.png"));
+check("theme: a dark screenshot was kept for review", existsSync(mobileDarkShot), mobileDarkShot);
+await cdp.mediaScheme("light");
+await cdp.evaluate("localStorage.removeItem('boards-theme')");
+await cdp.reload();
+await cdp.waitFor("typeof __t === 'object' && __t.keys().length === 3", { label: "os light" });
+check("theme: going back to a light OS preference paints light again", (await cdp.evaluate("__t.theme().attr")) === "light");
+
+/* ---------------------------------------------- rename and delete a board */
+await cdp.click(`${cardSel(G1, SEEDS[0].id)} .rename`);
+await cdp.waitFor("__t.modal('rename-modal').hidden === false", { label: "rename dialog" });
+await fillField("#rename-input", "ชื่อใหม่ Alpha");
+await cdp.click("#rename-save");
+await cdp.waitFor(`__t.text('${cardSel(G1, SEEDS[0].id)} h2') === "ชื่อใหม่ Alpha"`, { label: "title renamed" });
+check(
+  "rename board: every copy of the card shows the new title",
+  (await cdp.evaluate(
+    `(() => Array.prototype.every.call(document.querySelectorAll('.card[data-slug="${SEEDS[0].id}"] h2'), (h2) => h2.textContent === "ชื่อใหม่ Alpha"))()`,
+  )) === true,
+);
+check("rename board: the server holds the new title", stub.state.boards.get(SEEDS[0].id).title === "ชื่อใหม่ Alpha");
+
+const deleteVisible = await cdp.evaluate(`document.querySelectorAll('.card[data-slug="${SEEDS[2].id}"]').length`);
+await cdp.click(`${cardSel("__none__", SEEDS[2].id)} .del`);
+await cdp.waitFor("__t.modal('del-modal').hidden === false", { label: "delete dialog" });
+check("delete board: the dialog names the file that will go", (await cdp.evaluate("__t.text('#del-detail')")).includes(`${SEEDS[2].id}.excalidraw`), await cdp.evaluate("__t.text('#del-detail')"));
+await cdp.hold("#del-hold", 1400);
+await cdp.waitFor(`document.querySelectorAll('.card[data-slug="${SEEDS[2].id}"]').length === 0`, { label: "board card removed" });
+check(
+  "delete board: the board disappears from the grid and the API",
+  (await cdp.evaluate("document.querySelectorAll('#sections .card').length")) === 3 && !stub.state.boards.has(SEEDS[2].id),
+  `${deleteVisible} copies before, 3 cards left (alpha twice, beta once)`,
+);
+check("delete board: the counter drops to the remaining boards", (await cdp.evaluate("__t.text('#count')")) === "2 กระดาน", await cdp.evaluate("__t.text('#count')"));
+
+/* -------------------------------------------------------- console hygiene */
+const jsErrors = cdp.consoleErrors.filter((line) =>
+  /Uncaught|TypeError|ReferenceError|SyntaxError|is not a function|Cannot read|Unhandled/.test(line),
+);
+check("console: no uncaught javascript errors during the whole run", jsErrors.length === 0, jsErrors.slice(0, 4).join(" | "));
+
+/* the stub answers 404 on purpose during the revert test — that is a network
+   log line, not a page error, so it must be the only other thing in the log */
+const otherErrors = cdp.consoleErrors.filter(
+  (line) => !/Failed to load resource|favicon/.test(line) && !jsErrors.includes(line),
+);
+check("console: the only other entries are the deliberate 404s", otherErrors.length === 0, otherErrors.slice(0, 3).join(" | "));
   } finally {
-    await cleanup();
+    chrome.kill();
+    /* chrome keeps keep-alive sockets on the stub; close them or close() never calls back */
+    if (typeof stub.server.closeAllConnections === "function") stub.server.closeAllConnections();
+    await Promise.race([
+      new Promise((resolve) => stub.server.close(resolve)),
+      sleep(3000),
+    ]);
   }
 
-  const passed = results.filter((entry) => entry.ok).length;
+  const passed = results.filter((result) => result.ok).length;
   console.log(`\n${passed}/${results.length} checks passed`);
   if (failures) {
-    console.log("\nfailures:");
-    for (const entry of results.filter((item) => !item.ok)) console.log(`  - ${entry.name} (${entry.detail})`);
+    console.log(`\n${failures} failed:`);
+    for (const result of results) {
+      if (!result.ok) console.log(`  · ${result.name}${result.detail ? ` — ${result.detail}` : ""}`);
+    }
   }
-  process.exitCode = failures ? 1 : 0;
+  console.log(`screenshots: ${OUT}`);
+  if (failures) process.exitCode = 1;
 }
 
 main().catch((error) => {
-  console.error(`\nFAILED: ${error.stack || error.message}`);
+  console.error(`\nharness error: ${error && error.stack ? error.stack : error}`);
   process.exitCode = 1;
 });
