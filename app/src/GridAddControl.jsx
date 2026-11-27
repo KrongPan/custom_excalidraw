@@ -8,10 +8,11 @@ import { gridMetrics, tableBounds } from "./table.js";
      sits at the line's start end: a row line grows the pill to the left of the
      table, a column line above it. Clicking inserts a track *at that line*, so
      a row can be added anywhere, not only at the top or the bottom.
-   - on the outer border of a table one "-" pill drops the track the pointer is
-     beside: the left/right border drops that row, the top/bottom border drops
-     that column. The pill sits outside the grid, clear of every cell, so it
-     never swallows a click meant for a cell.
+   - on the outer border of a table, seen from OUTSIDE it, one "-" pill drops
+     the track the pointer is beside: the left/right border drops that row,
+     the top/bottom border drops that column. A pointer inside a cell shows
+     none, however close to the edge it sits; the pill itself sits outside the
+     grid, clear of every cell, so it never swallows a click meant for a cell.
      A class is one column of lines: its "-" drops the field/method line under
      the pointer and its "+" adds a line at the hovered boundary.
 
@@ -26,6 +27,9 @@ const HIT_PAD = 30;
 const TOL = 6;
 /** A pill sits this far outside the line/grid it belongs to (screen px). */
 const HANDLE_GAP = 10;
+/** How far outside a border the removal shows: the pointer has to be outside
+    the grid, and this band has to reach the pill sitting HANDLE_GAP out. */
+const EDGE_PAD = 16;
 /** Keep pills this far inside the canvas edge. */
 const EDGE = 6;
 /** Mousedown inside Excalidraw chrome is not a grid hover. */
@@ -307,6 +311,8 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
       const scrollY = state.scrollY || 0;
       const sceneX = pointer.x / zoom - scrollX;
       const sceneY = pointer.y / zoom - scrollY;
+      const screenX = (x) => (x + scrollX) * zoom;
+      const screenY = (y) => (y + scrollY) * zoom;
       const hostW = host.clientWidth;
       const hostH = host.clientHeight;
       const scene = api.getSceneElements();
@@ -339,7 +345,18 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
         const top = (geometry.bounds.top + scrollY) * zoom;
         const right = left + geometry.bounds.width * zoom;
         const bottom = top + geometry.bounds.height * zoom;
-        if (!inside && pointer.x >= left && pointer.x <= right && pointer.y >= top && pointer.y <= bottom) inside = entry;
+        // "inside" means clearly past the border: half a pixel on the line is
+        // still the border, so a pointer landing exactly on it counts as
+        // outside and gets that track's removal instead of nothing
+        if (
+          !inside &&
+          pointer.x > left + 0.5 &&
+          pointer.x < right - 0.5 &&
+          pointer.y > top + 0.5 &&
+          pointer.y < bottom - 0.5
+        ) {
+          inside = entry;
+        }
         for (const axis of ["row", "col"]) {
           // the pointer also has to lie beside the grid, not past its far end
           const beside =
@@ -361,11 +378,98 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
           }
         }
       }
-      if (!target) target = inside ?? candidates[candidates.length - 1];
+      /* The removal lives on a border seen from OUTSIDE the table: a pointer
+         inside a cell shows none, however close to the edge it sits. The band
+         reaches EDGE_PAD out, enough to walk from the border onto the pill
+         (which sits HANDLE_GAP out) without losing it on the way. */
+      const rowAt = (geometry, y) => {
+        let best = null;
+        for (const row of geometry.rows) {
+          const rowTop = screenY(row.top);
+          const rowBottom = screenY(row.bottom);
+          if (y >= rowTop && y <= rowBottom) return { row, distance: 0 };
+          const distance = Math.min(Math.abs(y - rowTop), Math.abs(y - rowBottom));
+          if (!best || distance < best.distance) best = { row, distance };
+        }
+        return best;
+      };
+      const colAt = (geometry, x) => {
+        let best = null;
+        for (const col of geometry.cols) {
+          const colLeft = screenX(col.left);
+          const colRight = screenX(col.right);
+          if (x >= colLeft && x <= colRight) return { col, distance: 0 };
+          const distance = Math.min(Math.abs(x - colLeft), Math.abs(x - colRight));
+          if (!best || distance < best.distance) best = { col, distance };
+        }
+        return best;
+      };
+      const edgeHitFor = (entry) => {
+        const geo = entry.geometry;
+        const gridLeft = screenX(geo.bounds.left);
+        const gridTop = screenY(geo.bounds.top);
+        const gridRight = gridLeft + geo.bounds.width * zoom;
+        const gridBottom = gridTop + geo.bounds.height * zoom;
+        const sides = [];
+        if (pointer.y >= gridTop - TOL && pointer.y <= gridBottom + TOL) {
+          if (pointer.x <= gridLeft + 0.5 && gridLeft - pointer.x <= EDGE_PAD) {
+            sides.push({ side: "left", axis: "row", distance: Math.max(0, gridLeft - pointer.x) });
+          }
+          if (pointer.x >= gridRight - 0.5 && pointer.x - gridRight <= EDGE_PAD) {
+            sides.push({ side: "right", axis: "row", distance: Math.max(0, pointer.x - gridRight) });
+          }
+        }
+        // a class is one column of lines: only its side edges have a track to drop
+        if (pointer.x >= gridLeft - TOL && pointer.x <= gridRight + TOL && geo.cols.length) {
+          if (pointer.y <= gridTop + 0.5 && gridTop - pointer.y <= EDGE_PAD) {
+            sides.push({ side: "top", axis: "col", distance: Math.max(0, gridTop - pointer.y) });
+          }
+          if (pointer.y >= gridBottom - 0.5 && pointer.y - gridBottom <= EDGE_PAD) {
+            sides.push({ side: "bottom", axis: "col", distance: Math.max(0, pointer.y - gridBottom) });
+          }
+        }
+        sides.sort((a, b) => a.distance - b.distance);
+        const side = sides[0];
+        if (!side) return null;
+        if (side.axis === "row") {
+          const hit = rowAt(geo, pointer.y);
+          if (!hit) return null;
+          return {
+            side: side.side,
+            axis: "row",
+            at: hit.row.index,
+            distance: side.distance,
+            line:
+              entry.kind === "class" && hit.row.section
+                ? { section: hit.row.section, index: hit.row.lineIndex }
+                : null,
+          };
+        }
+        const hit = colAt(geo, pointer.x);
+        if (!hit) return null;
+        return { side: side.side, axis: "col", at: hit.col.index, distance: side.distance, line: null };
+      };
+
+      let edge = null;
+      if (line) {
+        // a border line carries the insert and, from outside, the removal too
+        edge = edgeHitFor(target);
+      } else if (inside) {
+        // inside a cell: nothing rides it, however close to the border
+        target = inside;
+      } else {
+        // outside every grid: the nearest border band wins, not the last grid
+        for (const entry of candidates) {
+          const hit = edgeHitFor(entry);
+          if (hit && (!edge || hit.distance < edge.distance - 0.5)) {
+            edge = hit;
+            target = entry;
+          }
+        }
+        if (!target) target = candidates[candidates.length - 1];
+      }
 
       const { geometry, kind, grid } = target;
-      const screenX = (x) => (x + scrollX) * zoom;
-      const screenY = (y) => (y + scrollY) * zoom;
       const left = screenX(geometry.bounds.left);
       const top = screenY(geometry.bounds.top);
       const width = geometry.bounds.width * zoom;
@@ -394,65 +498,6 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
         insert = kind === "class" && boundary ? { section: boundary.section, index: boundary.lineIndex } : null;
       } else {
         place(plus, null, false);
-      }
-
-      // ---- the outer border under the pointer: the side edges drop a row, the
-      // top/bottom edges drop a column
-      const rowAt = (y) => {
-        let best = null;
-        for (const row of geometry.rows) {
-          const rowTop = screenY(row.top);
-          const rowBottom = screenY(row.bottom);
-          if (y >= rowTop && y <= rowBottom) return { row, distance: 0 };
-          const distance = Math.min(Math.abs(y - rowTop), Math.abs(y - rowBottom));
-          if (!best || distance < best.distance) best = { row, distance };
-        }
-        return best;
-      };
-      const colAt = (x) => {
-        let best = null;
-        for (const col of geometry.cols) {
-          const colLeft = screenX(col.left);
-          const colRight = screenX(col.right);
-          if (x >= colLeft && x <= colRight) return { col, distance: 0 };
-          const distance = Math.min(Math.abs(x - colLeft), Math.abs(x - colRight));
-          if (!best || distance < best.distance) best = { col, distance };
-        }
-        return best;
-      };
-
-      const sides = [];
-      const nearY = pointer.y >= top - TOL && pointer.y <= bottom + TOL;
-      const nearX = pointer.x >= left - TOL && pointer.x <= right + TOL;
-      if (nearY) {
-        if (Math.abs(pointer.x - left) <= TOL) sides.push({ side: "left", axis: "row", distance: Math.abs(pointer.x - left) });
-        if (Math.abs(pointer.x - right) <= TOL) sides.push({ side: "right", axis: "row", distance: Math.abs(pointer.x - right) });
-      }
-      // a class is one column of lines: only its side edges have a track to drop
-      if (nearX && geometry.cols.length) {
-        if (Math.abs(pointer.y - top) <= TOL) sides.push({ side: "top", axis: "col", distance: Math.abs(pointer.y - top) });
-        if (Math.abs(pointer.y - bottom) <= TOL) sides.push({ side: "bottom", axis: "col", distance: Math.abs(pointer.y - bottom) });
-      }
-      sides.sort((a, b) => a.distance - b.distance);
-
-      let edge = null;
-      const side = sides[0];
-      if (side?.axis === "row") {
-        const hit = rowAt(pointer.y);
-        if (hit) {
-          edge = {
-            side: side.side,
-            axis: "row",
-            at: hit.row.index,
-            line:
-              kind === "class" && hit.row.section
-                ? { section: hit.row.section, index: hit.row.lineIndex }
-                : null,
-          };
-        }
-      } else if (side?.axis === "col") {
-        const hit = colAt(pointer.x);
-        if (hit) edge = { side: side.side, axis: "col", at: hit.col.index, line: null };
       }
 
       if (edge?.axis === "row") {

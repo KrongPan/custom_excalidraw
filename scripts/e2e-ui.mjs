@@ -1053,6 +1053,29 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(sideView.insert),
     );
 
+    /* the removal band lives outside the table: a few px inside the border is
+       a cell, and a cell shows nothing (the border line's insert may remain) */
+    const insideGeom = await gridGeom();
+    const rowMid = (insideGeom.rows[1].top + insideGeom.rows[1].bottom) / 2;
+    await moveTo(insideGeom.table.left + 4, rowMid);
+    await sleep(220);
+    const insideBorderView = await pills();
+    check(
+      "a point just inside the border shows no removal",
+      !insideBorderView.row?.visible && !insideBorderView.col?.visible,
+      JSON.stringify({ row: insideBorderView.row?.visible, col: insideBorderView.col?.visible }),
+    );
+
+    /* and just outside the same border it does show, level with that row */
+    await moveTo(insideGeom.table.left - 4, rowMid);
+    await waitPill(".grid-add-row-del", 1);
+    const outsideBorderView = await pills();
+    check(
+      "a point just outside the border shows that row's removal",
+      Boolean(outsideBorderView.row?.visible) && outsideBorderView.row.at === 1,
+      JSON.stringify(outsideBorderView.row),
+    );
+
     /* the top border drops the column it is level with */
     const topGeom = await hoverTopBorder(1);
     await waitPill(".grid-add-col-del", 1);
@@ -2340,6 +2363,10 @@ async function openEditor(boardId = BOARD) {
     /* a class has no cells: its removals live on the side border, level with the
        field/method line they drop */
     const classEdge = async (k) => {
+      // the insert before this rebuilt the class and scrolled it into view; a
+      // point measured mid-animation would land inside the frame, where the
+      // removal band deliberately does not reach
+      await camSettled();
       const point = await cdp.evaluate(`(() => {
         const api = window.__boardsApi;
         const frame = api.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.frame && !el.isDeleted);
@@ -2351,7 +2378,9 @@ async function openEditor(boardId = BOARD) {
         const zoom = s.zoom?.value || 1;
         const host = document.querySelector(".canvas").getBoundingClientRect();
         return {
-          x: host.left + (frame.x + (s.scrollX || 0)) * zoom,
+          // the removal is a border seen from OUTSIDE: aim a few px off the
+          // frame so the point is not a sub-pixel coin flip on the edge itself
+          x: host.left + (frame.x + (s.scrollX || 0)) * zoom - 4,
           y: host.top + (lines[${k}].y + lines[${k}].height / 2 + (s.scrollY || 0)) * zoom,
         };
       })()`.replace(/__GRID__/g, firstClassGrid));
