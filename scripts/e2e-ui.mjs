@@ -1153,6 +1153,126 @@ async function openEditor(boardId = BOARD) {
       `${JSON.stringify(shape0)} -> ${JSON.stringify(backToStart)}`,
     );
 
+    /* ------------------------------ a clicked cell keeps its removals up */
+    const pinned = await cellPoint(1, 1);
+    await cdp.clickPoint(pinned.x, pinned.y);
+    await sleep(320);
+    const afterPin = await pills();
+    check(
+      "clicking a cell pins its removals",
+      Boolean(afterPin.row?.visible && afterPin.col?.visible && afterPin.row.at === 1 && !afterPin.insert?.visible),
+      JSON.stringify({ row: afterPin.row?.at, col: afterPin.col?.at, insert: afterPin.insert?.visible }),
+    );
+
+    await moveTo(60, 320); // empty canvas, well clear of the table
+    const keptAfterLeave = await pills();
+    check(
+      "the pinned removals stay up after the pointer leaves the cell",
+      Boolean(keptAfterLeave.row?.visible && keptAfterLeave.col?.visible && keptAfterLeave.row.at === 1),
+      JSON.stringify({ row: keptAfterLeave.row?.visible, col: keptAfterLeave.col?.visible }),
+    );
+
+    await clickPill(".grid-add-row-del");
+    await waitRows(rows0 - 1);
+    const afterPinnedDrop = await gridShape(tableGrid);
+    const onceDropped = await pills();
+    check(
+      "the pinned removal deletes that row from a distance",
+      afterPinnedDrop.rows === rows0 - 1 && afterPinnedDrop.cols === cols0,
+      JSON.stringify(afterPinnedDrop),
+    );
+    check(
+      "the pin clears once the row is gone",
+      !onceDropped.row?.visible && !onceDropped.col?.visible,
+      JSON.stringify({ row: onceDropped.row?.visible, col: onceDropped.col?.visible }),
+    );
+
+    /* put the row back so the resize checks below see the usual 4 x 3 */
+    const shrunk = await gridGeom();
+    await hoverLine("row", shrunk.rows.length);
+    await waitPill(".grid-add-insert", shrunk.rows.length);
+    await clickPill(".grid-add-insert");
+    await waitRows(rows0);
+
+    /* a click on plain canvas should drop the pin again */
+    const pinBack = await cellPoint(1, 1);
+    await cdp.clickPoint(pinBack.x, pinBack.y);
+    await sleep(340);
+    const emptySpot = await cdp.evaluate(`(() => {
+      const r = document.querySelector(".canvas").getBoundingClientRect();
+      return { x: r.right - 240, y: r.bottom - 120 };
+    })()`);
+    await cdp.clickPoint(emptySpot.x, emptySpot.y);
+    await sleep(420);
+    const afterEmptyClick = await pills();
+    check(
+      "a click on empty canvas clears the pin",
+      !afterEmptyClick.row?.visible && !afterEmptyClick.col?.visible,
+      JSON.stringify({ x: Math.round(emptySpot.x), row: afterEmptyClick.row?.visible, col: afterEmptyClick.col?.visible }),
+    );
+
+    /* ----------------------------- a click picks one cell, not the table */
+    const selection = () =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const state = api.getAppState();
+        const ids = Object.keys(state.selectedElementIds || {});
+        const cells = api.getSceneElements()
+          .filter((el) => ids.includes(el.id) && el.customData?.grid && el.customData?.r != null)
+          .map((el) => ({ grid: el.customData.grid, r: el.customData.r, c: el.customData.c }));
+        return {
+          count: ids.length,
+          cells,
+          groups: Object.keys(state.selectedGroupIds || {}).length,
+          editingGroupId: state.editingGroupId ?? null,
+        };
+      })()`);
+
+    const firstPick = await cellPoint(2, 1);
+    await cdp.clickPoint(firstPick.x, firstPick.y);
+    await sleep(320);
+    const picked = await selection();
+    check(
+      "a click on a cell picks that cell alone",
+      picked.count === 1 &&
+        picked.cells.length === 1 &&
+        picked.cells[0].grid === tableGrid &&
+        picked.cells[0].r === 2 &&
+        picked.cells[0].c === 1 &&
+        picked.groups === 0 &&
+        !picked.editingGroupId,
+      JSON.stringify(picked),
+    );
+
+    const nextPick = await cellPoint(1, 2);
+    await cdp.clickPoint(nextPick.x, nextPick.y);
+    await sleep(320);
+    const repicked = await selection();
+    check(
+      "a click on another cell moves the pick",
+      repicked.count === 1 && repicked.cells[0]?.r === 1 && repicked.cells[0]?.c === 2,
+      JSON.stringify(repicked),
+    );
+
+    const lineGeom = await gridGeom();
+    await cdp.clickPoint(lineGeom.table.left + 40, lineGeom.rows[1].top);
+    await sleep(360);
+    const onLine = await selection();
+    check(
+      "a press on a table line takes the whole table",
+      onLine.count > 1 && onLine.cells.length === onLine.count && onLine.groups >= 1 && !onLine.editingGroupId,
+      JSON.stringify({ count: onLine.count, cells: onLine.cells.length, groups: onLine.groups }),
+    );
+
+    const clearSpot = await cdp.evaluate(`(() => {
+      const r = document.querySelector(".canvas").getBoundingClientRect();
+      return { x: r.right - 240, y: r.bottom - 120 };
+    })()`);
+    await cdp.clickPoint(clearSpot.x, clearSpot.y);
+    await sleep(380);
+    const cleared = await selection();
+    check("a click on empty canvas drops the cell pick", cleared.count === 0, JSON.stringify(cleared));
+
     /* ------------------------------------------- drag a cell border to size */
     const resizeTarget = () =>
       cdp.evaluate(`(() => {

@@ -1859,6 +1859,49 @@ export default function App() {
     [addClassRow, describeGrid, growGrid, queueSave, shrinkGrid],
   );
 
+  /* A click on one cell picks that cell instead of the whole grouped table, so
+     the grid can later act on a single cell (split/merge) rather than on every
+     element of the table. Inside the table's group Excalidraw keeps one member
+     selectable; the next click outside the group leaves it again. */
+  const pickCell = useCallback((hit) => {
+    const api = apiRef.current;
+    if (!api || !hit || hit.kind === "class") return;
+    if (hit.mode === "grid") {
+      // a press on a table line takes the whole table, so the panel edits it;
+      // selecting the members as their group draws one box instead of per-cell ones
+      const selectedElementIds = {};
+      const selectedGroupIds = {};
+      for (const el of api.getSceneElements()) {
+        if (el.isDeleted || el.customData?.grid !== hit.grid) continue;
+        selectedElementIds[el.id] = true;
+        for (const groupId of el.groupIds || []) selectedGroupIds[groupId] = true;
+      }
+      api.updateScene({ appState: { selectedElementIds, selectedGroupIds, editingGroupId: null }, captureUpdate: "NEVER" });
+      return;
+    }
+    if (hit.mode !== "cell") return;
+    const cell = api
+      .getSceneElements()
+      .find(
+        (el) =>
+          !el.isDeleted &&
+          el.customData?.grid === hit.grid &&
+          Number(el.customData?.r) === hit.row &&
+          Number(el.customData?.c) === hit.col,
+      );
+    if (!cell) return;
+    api.updateScene({
+      appState: {
+        selectedElementIds: { [cell.id]: true },
+        selectedGroupIds: {},
+        // staying out of Excalidraw's group-edit mode keeps the cell a normal
+        // selection: a click on empty canvas or Escape clears it again
+        editingGroupId: null,
+      },
+      captureUpdate: "NEVER",
+    });
+  }, []);
+
   /** ER tool: link the two picked classes with one crowfoot arrow. */
   const connectPickedClasses = useCallback(() => {
     const api = apiRef.current;
@@ -2226,7 +2269,12 @@ export default function App() {
             window.__boardsApi = api; // handy for the e2e harness
           }}
         />
-        <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onChange={changeGridFromHandle} />
+        <GridAddControl
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          onChange={changeGridFromHandle}
+          onPick={pickCell}
+        />
         <GridResizeControl
           apiRef={apiRef}
           canvasRef={canvasRef}

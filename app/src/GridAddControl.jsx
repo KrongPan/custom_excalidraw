@@ -136,12 +136,20 @@ function MinusIcon() {
   );
 }
 
-export default function GridAddControl({ apiRef, canvasRef, onChange }) {
+export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) {
   const plusRef = useRef(null);
   const minusRowRef = useRef(null);
   const minusColRef = useRef(null);
   const pointerRef = useRef(null);
   const viewRef = useRef(null);
+  // a cell that was clicked keeps its removals on screen after the pointer
+  // leaves, otherwise the pills vanish on the way to them and cannot be pressed
+  const pinRef = useRef(null);
+  const pinPendingRef = useRef(false);
+  // where the last press landed, so a release in the same spot counts as a click
+  const pressRef = useRef(null);
+  const pickRef = useRef(onPick);
+  pickRef.current = onPick;
   const [view, setView] = useState(null);
   const changeRef = useRef(onChange);
   changeRef.current = onChange;
@@ -157,15 +165,81 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
         pointerRef.current = null;
       }
     };
+    /* The table cell under a point, read from the scene itself: the frame that
+       paints the pills may not have run since the pointer moved, so the hover
+       state cannot answer "which cell was pressed". */
+    const cellAt = (clientX, clientY) => {
+      const api = apiRef.current;
+      const host = canvasRef.current;
+      if (!api || !host) return null;
+      const state = api.getAppState();
+      const zoom = state.zoom?.value || 1;
+      const sceneX = clientX / zoom - (state.scrollX || 0);
+      const sceneY = clientY / zoom - (state.scrollY || 0);
+      const scene = api.getSceneElements();
+      let found = null;
+      for (const entry of gridsOf(scene)) {
+        if (entry.kind === "class") continue; // a class picks lines, not cells
+        const geometry = tableGeometry(scene, entry.grid);
+        if (!geometry) continue;
+        const b = geometry.bounds;
+        if (sceneX < b.left || sceneX > b.left + b.width) continue;
+        if (sceneY < b.top || sceneY > b.top + b.height) continue;
+        found = { grid: entry.grid, kind: entry.kind, geometry };
+      }
+      if (!found) return null;
+      // a press right on a border picks the whole table: the line is already the
+      // table-level surface (its pill inserts), the inside of a cell is a cell
+      const onLine =
+        found.geometry.rowLines.some((line) => Math.abs(line - sceneY) * zoom <= TOL) ||
+        found.geometry.colLines.some((line) => Math.abs(line - sceneX) * zoom <= TOL);
+      if (onLine) return { mode: "grid", kind: found.kind, grid: found.grid };
+      const row = found.geometry.rows.find((entry) => sceneY >= entry.top && sceneY <= entry.bottom);
+      const col = found.geometry.cols.find((entry) => sceneX >= entry.left && sceneX <= entry.right);
+      if (!row || !col) return null;
+      return { mode: "cell", kind: found.kind, grid: found.grid, row: row.index, col: col.index };
+    };
+
+    const onDown = (event) => {
+      // pressing a pill must not disturb the pin it belongs to; any other press
+      // asks the next frame to re-pin under the pointer or drop the old pin
+      const chrome = event.target instanceof Element && event.target.closest(IGNORE);
+      pressRef.current =
+        event.button === 0 && !chrome && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey
+          ? { x: event.clientX, y: event.clientY, cell: chrome ? null : cellAt(event.clientX, event.clientY) }
+          : null;
+      if (event.target instanceof Element && event.target.closest(".grid-add")) return;
+      pinPendingRef.current = true;
+    };
+    /* A plain click on a cell (no drag, no modifier) picks that one cell; the
+       table's own group selection would otherwise swallow every cell. */
+    const onUp = (event) => {
+      const down = pressRef.current;
+      pressRef.current = null;
+      if (!down || !down.cell || event.button !== 0) return;
+      if (Math.abs(event.clientX - down.x) > 4 || Math.abs(event.clientY - down.y) > 4) return;
+      pickRef.current?.(down.cell);
+    };
     const onLeave = () => {
       pointerRef.current = null;
     };
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      pinRef.current = null;
+      pinPendingRef.current = false;
+    };
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerdown", onMove, true);
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("keydown", onKey, true);
     window.addEventListener("blur", onLeave);
     return () => {
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerdown", onMove, true);
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("blur", onLeave);
     };
   }, [canvasRef]);
@@ -178,6 +252,85 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
       el.style.pointerEvents = visible ? "auto" : "none";
       if (!boxed) return;
       el.style.transform = `translate(${Math.round(boxed.x)}px, ${Math.round(boxed.y)}px)`;
+    };
+
+    // The two removal pills for one cell/line; returns the view it painted so
+    // a click can pin exactly that cell.
+    const paintCell = (geometry, kind, grid, rowEntry, colEntry) => {
+      const minusRow = minusRowRef.current;
+      const minusCol = minusColRef.current;
+      const plus = plusRef.current;
+      const api = apiRef.current;
+      const host = canvasRef.current;
+      if (!api || !host || !rowEntry) return null;
+      const state = api.getAppState();
+      const zoom = state.zoom?.value || 1;
+      const scrollX = state.scrollX || 0;
+      const scrollY = state.scrollY || 0;
+      const hostW = host.clientWidth;
+      const hostH = host.clientHeight;
+      const screenX = (x) => (x + scrollX) * zoom;
+      const screenY = (y) => (y + scrollY) * zoom;
+      const rowWidth = minusRow?.offsetWidth || 62;
+      const colWidth = minusCol?.offsetWidth || 62;
+      const height = minusRow?.offsetHeight || 26;
+      const x = kind === "class" ? screenX(geometry.bounds.left) : screenX(colEntry.left);
+      const y = screenY(rowEntry.top) - HANDLE_GAP - height;
+      const boxRow = {
+        x: Math.max(EDGE, Math.min(x, hostW - rowWidth - EDGE)),
+        y: Math.max(EDGE, Math.min(y, hostH - height - EDGE)),
+      };
+      place(minusRow, boxRow, true);
+      if (kind === "class") {
+        place(minusCol, null, false);
+      } else {
+        place(minusCol, { x: Math.max(EDGE, Math.min(boxRow.x + rowWidth + PAIR_GAP, hostW - colWidth - EDGE)), y: boxRow.y }, true);
+      }
+      place(plus, null, false);
+
+      const next = {
+        mode: "cell",
+        kind,
+        grid,
+        rows: geometry.rows.length,
+        cols: geometry.cols.length,
+        row: rowEntry.index,
+        col: kind === "class" ? 0 : Number(colEntry.index),
+        rowLine: kind === "class" ? { section: rowEntry.section, index: rowEntry.lineIndex } : null,
+      };
+      const same =
+        viewRef.current &&
+        viewRef.current.mode === "cell" &&
+        viewRef.current.grid === next.grid &&
+        viewRef.current.row === next.row &&
+        viewRef.current.col === next.col;
+      viewRef.current = same ? viewRef.current : next;
+      setView((old) => {
+        if (!old || old.mode !== "cell" || old.grid !== next.grid || old.row !== next.row || old.col !== next.col) return next;
+        return old;
+      });
+      return next;
+    };
+
+    /** Re-draw the pinned cell's removals, wherever the pointer went. */
+    const paintPinned = () => {
+      const pin = pinRef.current;
+      const api = apiRef.current;
+      if (!pin || !api) return false;
+      const scene = api.getSceneElements();
+      const geometry = pin.kind === "class" ? classGeometry(scene, pin.grid) : tableGeometry(scene, pin.grid);
+      const row = geometry?.rows[pin.row];
+      if (!geometry || !row) {
+        pinRef.current = null;
+        return false;
+      }
+      const col = pin.kind === "class" ? { left: geometry.bounds.left } : geometry.cols[pin.col];
+      if (!col) {
+        pinRef.current = null;
+        return false;
+      }
+      paintCell(geometry, pin.kind, pin.grid, row, col);
+      return true;
     };
 
     const paint = () => {
@@ -197,6 +350,16 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
       };
 
       if (!pointer) {
+        // the pointer sits over the panel or the board chrome (or left the
+        // window). A fresh press there means nothing is under it to pin, but a
+        // pin made earlier has to survive the pointer walking away.
+        if (pinPendingRef.current) {
+          pinRef.current = null;
+          pinPendingRef.current = false;
+          clear();
+          return;
+        }
+        if (pinRef.current && paintPinned()) return;
         clear();
         return;
       }
@@ -222,6 +385,13 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
         target = { grid: entry.grid, kind: entry.kind, geometry };
       }
       if (!target) {
+        // a click on empty canvas drops the pin; otherwise it keeps the
+        // removals of the cell that was clicked last
+        if (pinPendingRef.current) {
+          pinRef.current = null;
+          pinPendingRef.current = false;
+        }
+        if (pinRef.current && paintPinned()) return;
         clear();
         setView((old) => (old ? null : old));
         viewRef.current = null;
@@ -252,6 +422,11 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
       }
 
       if (line) {
+        // clicking beside a line asks for an insert, not a pinned removal
+        if (pinPendingRef.current) {
+          pinRef.current = null;
+          pinPendingRef.current = false;
+        }
         const width = plus?.offsetWidth || 62;
         const height = plus?.offsetHeight || 26;
         let x;
@@ -304,45 +479,11 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
         return;
       }
 
-      const rowWidth = minusRow?.offsetWidth || 62;
-      const colWidth = minusCol?.offsetWidth || 62;
-      const height = minusRow?.offsetHeight || 26;
-      const x = kind === "class" ? screenX(geometry.bounds.left) : screenX(cell.col.left);
-      const y = screenY(cell.row.top) - HANDLE_GAP - height;
-      const boxRow = { x: Math.max(EDGE, Math.min(x, hostW - rowWidth - EDGE)), y: Math.max(EDGE, Math.min(y, hostH - height - EDGE)) };
-      place(minusRow, boxRow, true);
-      if (kind === "class") {
-        place(minusCol, null, false);
-      } else {
-        const boxCol = {
-          x: Math.max(EDGE, Math.min(boxRow.x + rowWidth + PAIR_GAP, hostW - colWidth - EDGE)),
-          y: boxRow.y,
-        };
-        place(minusCol, boxCol, true);
+      const built = paintCell(geometry, kind, grid, cell.row, cell.col);
+      if (pinPendingRef.current) {
+        pinRef.current = built;
+        pinPendingRef.current = false;
       }
-      place(plus, null, false);
-
-      const next = {
-        mode: "cell",
-        kind,
-        grid,
-        rows: geometry.rows.length,
-        cols: geometry.cols.length,
-        row: kind === "class" ? cell.row.index : Number(cell.row.index),
-        col: kind === "class" ? 0 : Number(cell.col.index),
-        rowLine: kind === "class" ? { section: cell.row.section, index: cell.row.lineIndex } : null,
-      };
-      const sameCell =
-        viewRef.current &&
-        viewRef.current.mode === "cell" &&
-        viewRef.current.grid === next.grid &&
-        viewRef.current.row === next.row &&
-        viewRef.current.col === next.col;
-      viewRef.current = sameCell ? viewRef.current : next;
-      setView((old) => {
-        if (!old || old.mode !== "cell" || old.grid !== next.grid || old.row !== next.row || old.col !== next.col) return next;
-        return old;
-      });
     };
 
     frame = window.requestAnimationFrame(paint);
@@ -363,6 +504,10 @@ export default function GridAddControl({ apiRef, canvasRef, onChange }) {
   const fire = (event, axis, delta) => {
     event.stopPropagation();
     const current = viewRef.current;
+    // the grid is rebuilt after this, so both the pin and the hovered cell are
+    // stale (the rows/columns around them may have shifted)
+    pinRef.current = null;
+    pinPendingRef.current = false;
     if (!current) return;
     const grid = current.grid;
     const kind = current.kind;
