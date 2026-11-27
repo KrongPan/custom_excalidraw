@@ -89,16 +89,16 @@ function humanize(slug) {
     .join(" ");
 }
 
+const THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+
 function formatDay(ms) {
   const d = new Date(ms);
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return `${d.getDate()} ${THAI_MONTHS[d.getMonth()]}`;
 }
 
 function formatDate(ms) {
   const d = new Date(ms);
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  return `${d.getDate()} ${THAI_MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 function formatBytes(n) {
@@ -375,16 +375,23 @@ function renderPage(entries, generatedAt) {
     '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="9.5" height="9.5" rx="1.8"/><rect x="15" y="3" width="6" height="4.5" rx="1.4"/><rect x="15" y="10" width="6" height="11" rx="1.8"/><rect x="3" y="15" width="9.5" height="6" rx="1.4"/></svg>';
 
   const cards = entries
-    .map((entry) => {
+    .map((entry, index) => {
       const href = `/b/${encodeURIComponent(entry.slug)}`;
       const download = `/scenes/${entry.slug}.excalidraw`;
+      // The first row loads with the page; everything below waits for the
+      // scroll. width/height are the PNG's own pixels, so a lazy thumb never
+      // shifts the grid once it arrives.
+      const eager = index < 3;
+      const size =
+        entry.thumbWidth && entry.thumbHeight
+          ? ` width="${entry.thumbWidth}" height="${entry.thumbHeight}"`
+          : "";
       const preview = entry.thumb
-        ? `<img src="/gallery/thumbs/${entry.slug}.png?${entry.mtime}" alt="" loading="lazy">`
+        ? `<img src="/gallery/thumbs/${entry.slug}.png?${entry.mtime}" alt=""${size} loading="${eager ? "eager" : "lazy"}"${eager ? ' fetchpriority="high"' : ""}>`
         : `<span class="placeholder">ยังไม่มีภาพตัวอย่าง</span>`;
       const bits = [
-        `${entry.elements} elements`,
-        entry.frames ? `${entry.frames} frames` : null,
-        entry.width ? `${entry.width}×${entry.height}` : null,
+        `${entry.elements} องค์ประกอบ`,
+        entry.frames ? `${entry.frames} เฟรม` : null,
         `${entry.sizeLabel}`,
         formatDay(entry.updated),
       ].filter(Boolean);
@@ -448,7 +455,7 @@ function renderPage(entries, generatedAt) {
 <meta name="color-scheme" content="light dark">
 <link rel="icon" type="image/png" sizes="32x32" href="/gallery/logo-32.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/gallery/logo-180.png">
-<meta name="theme-color" content="#f4f6ff">
+<meta name="theme-color" content="#eef1f8">
 <title>Excalidraw boards</title>
 <script>
 /* Runs before the first paint so a dark-theme visitor never sees the light page
@@ -462,6 +469,16 @@ try {
 } catch (err) {
   document.documentElement.setAttribute("data-theme", "light");
 }
+/* theme-color is the one browser chrome token CSS cannot reach */
+try {
+  var themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) {
+    themeMeta.setAttribute(
+      "content",
+      document.documentElement.getAttribute("data-theme") === "dark" ? "#0b0d16" : "#eef1f8",
+    );
+  }
+} catch (err) {}
 </script>
 <style>
   /* Every colour the page paints goes through a token, so the dark theme is a
@@ -501,7 +518,7 @@ try {
     --accent: #6360d9;
     --accent-soft: rgba(99, 96, 217, 0.12);
     --ring: 0 0 0 3px rgba(99, 96, 217, 0.14);
-    --btn-a: #7673e3;
+    --btn-a: #6a67d8;
     --btn-b: #6360d9;
     --btn-line: rgba(255, 255, 255, 0.3);
     --btn-inset: inset 0 1px 0 rgba(255, 255, 255, 0.28);
@@ -622,6 +639,9 @@ try {
     box-shadow: var(--shadow);
   }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+  /* the phone layout pulls these three into one row; wider screens keep them
+     as direct flex items of .top */
+  .bar-actions { display: contents; }
   h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.3px; }
   .brand {
     width: 30px; height: 30px; flex: none;
@@ -964,16 +984,41 @@ try {
   body[data-view="bento"] .board-section[data-collapsed="1"] .grid { display: none; }
   body[data-view="list"] #sections.searching .board-section[data-collapsed="1"] .grid { display: flex; }
   body[data-view="bento"] #sections.searching .board-section[data-collapsed="1"] .grid { display: grid; }
-  /* narrow screens: keep the title row for title + actions, give search its own row */
+  /* On a phone only the bars that change what you see stay pinned: title,
+     layout controls and search. The group chips scroll away with the page, so
+     the header can never eat the viewport. display:contents lets each bar be
+     sticky on its own without changing the DOM. */
+  @media (max-width: 640px) {
+    header { display: contents; }
+    .top {
+      position: sticky; top: 8px; z-index: 20;
+      max-width: 1180px; margin: 0 auto 12px; padding: 9px 11px;
+      border: 1px solid var(--glass-line); border-radius: 16px;
+      background: linear-gradient(180deg, var(--head-a), var(--head-b));
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      box-shadow: var(--shadow);
+    }
+    #groupbar {
+      max-width: 1180px; margin: 0 auto 18px; padding: 8px 11px;
+      border: 1px solid var(--glass-line); border-radius: 14px;
+      background: linear-gradient(180deg, var(--head-a), var(--head-b));
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      box-shadow: var(--shadow);
+    }
+  }
+  /* On a phone the header is three rows: title and count, then the layout
+     controls with the new-board button (wrapped once so they cannot drift
+     apart), then a full-width search. */
   @media (max-width: 520px) {
     .top > .grow { display: none; }
     #count { order: 1; }
     #bar-toggle { order: 2; }
-    #view-switch { order: 3; }
-    #theme-toggle { order: 4; margin-left: auto; }
     .bar-summary { display: none; }
-    .app-link { order: 5; }
-    input[type="search"] { order: 6; flex: 1 1 100%; width: 100%; }
+    .bar-actions { display: flex; flex: 1 1 100%; align-items: center; gap: 9px; order: 3; }
+    .bar-actions #view-switch { order: 0; }
+    .bar-actions #theme-toggle { order: 1; margin-left: auto; }
+    .bar-actions .app-link { order: 2; }
+    input[type="search"] { order: 4; flex: 1 1 100%; width: 100%; }
   }
   /* list rows on a narrow screen: smaller thumbnail, text stacked next to the actions */
   @media (max-width: 640px) {
@@ -1108,8 +1153,37 @@ try {
   }
   #toast[hidden] { display: none; }
   #toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* Touch targets: these controls keep their painted size but grow a
+     transparent 40px hit area. ::before only, because .bar-toggle::after is
+     the filter dot. Segments of the view switch grow vertically only — 40px
+     wide segments would overlap and steal each other's taps. */
+  .themebtn, .view-btn, .chip, #group-new, .sect-toggle, .sect-btn, .iconbtn,
+  .card-group, .app-link, .primary, .ghost, .dangerbtn, .group-menu .group-clear {
+    position: relative;
+  }
+  .themebtn::before, .bar-toggle::before, .view-btn::before, .chip::before,
+  #group-new::before, .sect-toggle::before, .sect-btn::before, .iconbtn::before,
+  .card-group::before, .app-link::before, .primary::before, .ghost::before,
+  .dangerbtn::before, .group-menu .group-clear::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: max(100%, 40px); height: max(100%, 40px);
+    transform: translate(-50%, -50%);
+  }
+  .view-btn::before { width: 100%; }
+  @media (max-width: 640px) {
+    .card .actions .primary::before,
+    .card .actions .iconbtn::before { width: max(100%, 44px); height: max(100%, 44px); }
+  }
+  @media (max-width: 520px) {
+    .chip, .chip .n, #group-new, .sect-count, .sect-btn, .bar-summary,
+    .group-menu label, .group-menu .group-clear, footer { font-size: 12px; }
+    .meta { font-size: 13px; }
+    button.card-group { font-size: 12px; }
+    body[data-view="bento"] button.card-group { font-size: 12px; }
+    body[data-view="bento"] .card[data-weight="large"] .meta { font-size: 13px; }
+  }
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    header, .card, .modal-card { background: var(--fallback-bg); }
+    header, #groupbar, .top, .card, .modal-card { background: var(--fallback-bg); }
   }
 </style>
 </head>
@@ -1138,13 +1212,15 @@ try {
     <input type="search" id="q" placeholder="ค้นหากระดาน…" aria-label="ค้นหากระดาน" autocomplete="off" spellcheck="false">
     <button type="button" id="bar-toggle" class="bar-toggle" aria-expanded="true" aria-controls="groupbar" title="ย่อหมวดหมู่" aria-label="ย่อหมวดหมู่"${hasGroupHints ? "" : " hidden"}><span class="chev">${ICON_CHEVRON}</span></button>
     <span id="bar-summary" class="bar-summary" hidden aria-live="polite"><span class="txt"></span></span>
-    <div id="view-switch" class="view-switch" role="radiogroup" aria-label="รูปแบบการแสดงผล">
-      <button type="button" class="view-btn" data-view="card" role="radio" aria-checked="true" title="การ์ด" tabindex="0">${ICON_VIEW_CARD}</button>
-      <button type="button" class="view-btn" data-view="list" role="radio" aria-checked="false" title="รายการ" tabindex="-1">${ICON_VIEW_LIST}</button>
-      <button type="button" class="view-btn" data-view="bento" role="radio" aria-checked="false" title="เบนโต" tabindex="-1">${ICON_VIEW_BENTO}</button>
+    <div class="bar-actions">
+      <div id="view-switch" class="view-switch" role="radiogroup" aria-label="รูปแบบการแสดงผล">
+        <button type="button" class="view-btn" data-view="card" role="radio" aria-checked="true" title="การ์ด" tabindex="0">${ICON_VIEW_CARD}</button>
+        <button type="button" class="view-btn" data-view="list" role="radio" aria-checked="false" title="รายการ" tabindex="-1">${ICON_VIEW_LIST}</button>
+        <button type="button" class="view-btn" data-view="bento" role="radio" aria-checked="false" title="เบนโต" tabindex="-1">${ICON_VIEW_BENTO}</button>
+      </div>
+      <button class="themebtn" type="button" id="theme-toggle" aria-label="สลับเป็นโหมดมืด" title="สลับธีม"><span class="theme-glyph" aria-hidden="true">☾</span></button>
+      <a class="app-link" href="/new">+ กระดานใหม่</a>
     </div>
-    <button class="themebtn" type="button" id="theme-toggle" aria-label="สลับเป็นโหมดมืด" title="สลับธีม"><span class="theme-glyph" aria-hidden="true">☾</span></button>
-    <a class="app-link" href="/new">+ กระดานใหม่</a>
   </div>
   <div id="groupbar" hidden>
     <div id="group-chips" role="group" aria-label="กรองตามหมวดหมู่"></div>
@@ -1770,6 +1846,12 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
 
   function setTheme(theme, remember) {
     document.documentElement.setAttribute("data-theme", theme);
+    // the mobile browser chrome should follow the page, not stay light above
+    // a dark catalogue
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeMeta) {
+      themeMeta.setAttribute("content", theme === "dark" ? "#0b0d16" : "#eef1f8");
+    }
     if (remember) {
       try {
         localStorage.setItem("boards-theme", theme);
@@ -2667,8 +2749,12 @@ async function main() {
             : [],
         elements: info.elements,
         frames: info.frames,
-        width: px?.width || info.width,
-        height: px?.height || info.height,
+        // scene bounds, not the preview bitmap's pixels: every thumb is the
+        // same width, so the PNG size said nothing about the drawing
+        width: info.width,
+        height: info.height,
+        thumbWidth: px?.width || 0,
+        thumbHeight: px?.height || 0,
         // the bento span follows the scene itself, not the thumbnail bitmap:
         // every thumb is the same size, so it would weigh them all alike
         weight: sceneWeight(info.elements, info.width, info.height),
