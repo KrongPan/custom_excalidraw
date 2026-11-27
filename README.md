@@ -184,7 +184,7 @@ gallery/scenes/<id>/
 
 | method | path | หมายเหตุ |
 |---|---|---|
-| GET | `/api/health` | `{ ok: true }` |
+| GET | `/api/health` | `{ ok: true, commit, date, dataDir }` — `commit`/`date` มาจากตอน build (ไม่ตั้ง = `"dev"`) |
 | GET | `/api/boards` | `{boards:[{id,title,subtitle,groupId,groupIds,bytes,updated,elements}]}` (`groupIds` = หมวดทั้งหมดของกระดาน) |
 | POST | `/api/boards` | สร้างใหม่ body `{"name":"..."}` คืน `{id, scene}` |
 | GET | `/api/boards/:id` | scene เต็ม |
@@ -211,6 +211,8 @@ WebSocket: `/ws/board/<id>?name=<ชื่อผู้ใช้>&sid=<รหั�
 | `GALLERY_DIR` | `/gallery` | catalog ที่ generate แล้ว (mount จาก `gallery/site`) |
 | `APP_DIR` | `/srv/dist` | ไฟล์ SPA ที่ build แล้ว |
 | `HISTORY_KEEP` | `100` | จำนวน snapshot ต่อกระดาน (`0` = ไม่เก็บ) |
+| `BUILD_COMMIT` | `dev` | commit ของ build ที่ตอบอยู่ — ส่งเข้ามาตอน `docker compose build` และอ่านได้ที่ `/api/health` |
+| `BUILD_DATE` | `dev` | วันที่ build ในรูปแบบเดียวกัน, โผล่ที่ `/api/health` |
 | `MAX_BODY` | `32MB` | เพดาน payload ตอน PUT และข้อความ WebSocket |
 | `HEARTBEAT_MS` | `30000` | ช่วง ping ตรวจ socket ที่ตายแล้ว |
 | `GALLERY_BUILD` | `/srv/tools/build.mjs` | สคริปต์ที่เซิร์ฟเวอร์เรียกหลังกระดานเปลี่ยน (`--no-render`); ไม่ตั้ง = ไม่ refresh เอง |
@@ -229,6 +231,7 @@ node scripts/test-board-meta.mjs       # เปลี่ยนชื่อ/ค�
 node scripts/test-board-presence.mjs   # presence, sid ซ้ำ, heartbeat, relay เฟรม pointer/เลเซอร์
 node scripts/test-preview-watcher.mjs  # พรีวิว render ครั้งแรก, แก้ scene แล้ว render ใหม่, stamp ตาม scene
 node scripts/test-grid-resize.mjs      # ตาราง: ย่อ/ขยายแถวและคอลัมน์
+node scripts/test-server-http.mjs      # ส่งไฟล์: brotli/gzip, ETag→304, sweep ไฟล์ .tmp-, cache จำนวน element
 node scripts/test-merge.mjs        # รวม/แยกช่อง (pure, ไม่ต้องมีเบราว์เซอร์)
 node scripts/soak-table.mjs --seed 1   # property test ของตาราง (สุ่มแก้แล้วตรวจ invariant ทุกก้าว)
 ```
@@ -243,11 +246,16 @@ node scripts/soak-table.mjs --seeds 1..8 --ops 40 --json
 node scripts/soak-table.mjs --probe               # พิมพ์รูปทรงทุกก้าว
 ```
 
-ถ้าแก้ UI ให้รัน e2e เพิ่ม (ต้องมีเซิร์ฟเวอร์ที่เสิร์ฟ build ล่าสุด + headless Chrome):
+ถ้าแก้ UI ให้รัน e2e เพิ่ม (ต้องมีเซิร์ฟเวอร์ที่เสิร์ฟ build ล่าสุด + headless Chrome)
+
+`e2e-ui.mjs` สร้างและลบกระดาน/หมวดจริง จึงยอมรันเฉพาะเซิร์ฟเวอร์ที่ `DATA_DIR` อยู่ใต้ temp
+ถ้า `DATA_DIR` เป็นที่อื่นมันจะหยุดด้วย exit code 2 (override ด้วย `E2E_ALLOW_REAL_DATA=1`) และไม่ว่าจบแบบไหน
+ก็ลบหมวดของตัวเองใน `finally` กับตอนกด Ctrl-C:
 
 ```bash
-node scripts/e2e-ui.mjs http://127.0.0.1:5001   # หน้า board: เครื่องมือวาด, ตาราง, ER
-node scripts/e2e-catalog.mjs                     # หน้า catalog: 3 โหมดแสดงผล + แถบหมวดหมู่พับได้
+DATA_DIR=$(mktemp -d) PORT=5792 node app/server.mjs &        # เซิร์ฟเวอร์ทิ้งได้
+node scripts/e2e-ui.mjs http://127.0.0.1:5792                # หน้า board: เครื่องมือวาด, ตาราง, ER
+node scripts/e2e-catalog.mjs                                 # หน้า catalog: 3 โหมดแสดงผล + แถบหมวดหมู่พับได้
 ```
 
 `e2e-catalog.mjs` ตั้งโลกของตัวเองทั้งหมด (DATA_DIR/GALLERY_DIR ชั่วคราว + fixture 8 กระดาน 3 หมวดหมู่
@@ -263,12 +271,21 @@ production คือคอนเทนเนอร์ชุดเดียวจ
 ```bash
 git status --short && git log --oneline -3       # ต้องสะอาด
 node scripts/test-board-storage.mjs               # + เทสต์อื่นตามหัวข้อก่อนหน้า
-docker compose up -d --build
+docker compose build --build-arg BUILD_COMMIT=$(git rev-parse --short HEAD) --build-arg BUILD_DATE=$(date -u +%F)
+docker compose up -d
 docker compose ps                                 # ต้องได้ Up (healthy)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5001/api/boards    # 200
+curl -s http://localhost:5001/api/health          # commit ต้องตรงกับ git rev-parse --short HEAD
 ```
 
-ระหว่าง `up -d --build` มี downtime ~1–2 วินาที แท็บที่เปิดอยู่จะหลุด websocket แล้วต่อกลับเอง (ไฟล์ไม่หาย)
+`/api/health` บอก commit ของ build ที่ตอบอยู่ — ถ้าไม่ตรงกับ HEAD แปลว่า container ยังเสิร์ฟ build เก่า
+(cache หรือ `up` ค้าง) ไม่ใช่ “แก้แล้วไม่ขึ้น”
+
+ไฟล์ text (html/js/css/json/svg) ส่งแบบบีบอัด: Dockerfile รัน `node server.mjs --precompress dist` ตอน build
+เขียน `.br`/`.gz` ไว้ข้างไฟล์จริง เซิร์ฟเวอร์จึงหยิบไฟล์ที่บีบอัดแล้วมาส่งตรง ๆ ไม่ต้องใช้ CPU ตอนรัน
+(ไม่มี sidecar ก็บีบอัด on the fly ด้วย brotli/gzip) — ไฟล์ที่มี `ETag` จะตอบ `304` เมื่อแท็บเดิมเปิดซ้ำ
+
+ระหว่าง `build` แล้ว `up -d` มี downtime ~1–2 วินาที แท็บที่เปิดอยู่จะหลุด websocket แล้วต่อกลับเอง (ไฟล์ไม่หาย)
 
 ย้อนกลับ: image ใช้ tag เดียว `excalidraw-boards:latest` จึงย้อนด้วยโค้ด
 
