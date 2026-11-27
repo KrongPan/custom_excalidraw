@@ -634,6 +634,34 @@ export function isGridCell(el, gridId) {
   return Number.isFinite(cd.r) && Number.isFinite(cd.c);
 }
 
+/**
+ * How many tracks a cell covers. A plain cell is 1 x 1; merging cells keeps the
+ * top-left element and writes the span it swallowed into its customData.
+ */
+export function cellSpan(el) {
+  const cd = el?.customData;
+  if (!cd) return { rowSpan: 1, colSpan: 1 };
+  const rowSpan = Number.isFinite(cd.rowSpan) && cd.rowSpan > 1 ? cd.rowSpan | 0 : 1;
+  const colSpan = Number.isFinite(cd.colSpan) && cd.colSpan > 1 ? cd.colSpan | 0 : 1;
+  return { rowSpan, colSpan };
+}
+
+/** Bounds of the tracks a cell covers, as half-open indices [r0, r1] / [c0, c1]. */
+function cellRange(el) {
+  const r0 = el.customData.r | 0;
+  const c0 = el.customData.c | 0;
+  const { rowSpan, colSpan } = cellSpan(el);
+  return { r0, c0, r1: r0 + rowSpan - 1, c1: c0 + colSpan - 1, rowSpan, colSpan };
+}
+
+/** True when any cell of the grid covers more than one track. */
+export function hasMergedCells(elements, gridId) {
+  return gridCells(elements, gridId).some((el) => {
+    const { rowSpan, colSpan } = cellSpan(el);
+    return rowSpan > 1 || colSpan > 1;
+  });
+}
+
 /** True only for a live table frame — the invisible rectangle arrows bind to. */
 export function isGridFrame(el, gridId) {
   if (!el || el.type !== "rectangle" || el.isDeleted) return false;
@@ -912,15 +940,25 @@ export function snapGridTracks(elements, gridId) {
   const cells = gridCells(elements, gridId);
   if (cells.length < 2 && !cells.every(remembersSize)) return null;
 
+  // Only plain cells describe a track: a merged cell's height is the sum of the
+  // tracks it covers, so feeding it into a single row's consensus would fight
+  // the row's real cells. Every track must still have a plain cell.
+  const spans = cells.map((cell) => ({ cell, ...cellSpan(cell) }));
+  const plain = spans.filter((entry) => entry.rowSpan === 1 && entry.colSpan === 1).map((entry) => entry.cell);
+  if (!plain.length) return null;
   const rows = new Map();
   const cols = new Map();
-  for (const cell of cells) {
+  for (const cell of plain) {
     const { r, c } = cell.customData;
     if (!rows.has(r)) rows.set(r, []);
     if (!cols.has(c)) cols.set(c, []);
     rows.get(r).push(cell);
     cols.get(c).push(cell);
   }
+  const lastRow = Math.max(...spans.map(({ cell, rowSpan }) => (cell.customData.r | 0) + rowSpan - 1));
+  const lastCol = Math.max(...spans.map(({ cell, colSpan }) => (cell.customData.c | 0) + colSpan - 1));
+  for (let r = 0; r <= lastRow; r += 1) if (!rows.has(r)) return null;
+  for (let c = 0; c <= lastCol; c += 1) if (!cols.has(c)) return null;
 
   // A track keeps what its cells were built with (or resized to by the sliders);
   // only cells from older scenes, which carry no memory, fall back to agreement.
@@ -956,8 +994,12 @@ export function snapGridTracks(elements, gridId) {
   let changed = false;
   const out = (elements || []).map((el) => {
     if (!isGridCell(el, gridId)) return el;
-    const { r, c } = el.customData;
-    const geometry = { x: colLeft.get(c), y: rowTop.get(r), width: colWidth.get(c), height: rowHeight.get(r) };
+    const { r0, c0, r1, c1 } = cellRange(el);
+    let width = 0;
+    let height = 0;
+    for (let c = c0; c <= c1; c += 1) width += colWidth.get(c) ?? 0;
+    for (let r = r0; r <= r1; r += 1) height += rowHeight.get(r) ?? 0;
+    const geometry = { x: colLeft.get(c0), y: rowTop.get(r0), width: round(width), height: round(height) };
     if (
       Math.abs(el.x - geometry.x) < 0.5 &&
       Math.abs(el.y - geometry.y) < 0.5 &&
@@ -1042,12 +1084,13 @@ export function gridMetrics(elements, gridId) {
   const colLeft = new Map();
   const colRight = new Map();
   for (const cell of cells) {
-    const r = cell.customData.r | 0;
-    const c = cell.customData.c | 0;
-    rowTop.set(r, Math.min(rowTop.get(r) ?? Infinity, cell.y));
-    rowBottom.set(r, Math.max(rowBottom.get(r) ?? -Infinity, cell.y + cell.height));
-    colLeft.set(c, Math.min(colLeft.get(c) ?? Infinity, cell.x));
-    colRight.set(c, Math.max(colRight.get(c) ?? -Infinity, cell.x + cell.width));
+    // a merged cell owns the tracks it starts on and ends on, not the ones it
+    // covers in between: its full height must not be read as one row's height
+    const { r0, c0, r1, c1 } = cellRange(cell);
+    rowTop.set(r0, Math.min(rowTop.get(r0) ?? Infinity, cell.y));
+    rowBottom.set(r1, Math.max(rowBottom.get(r1) ?? -Infinity, cell.y + cell.height));
+    colLeft.set(c0, Math.min(colLeft.get(c0) ?? Infinity, cell.x));
+    colRight.set(c1, Math.max(colRight.get(c1) ?? -Infinity, cell.x + cell.width));
   }
   const rows = [...rowTop.keys()]
     .sort((a, b) => a - b)
@@ -1116,12 +1159,18 @@ function resizeTrack(elements, gridId, { axis, index, size, min, max, rewrap = t
   const cells = gridCells(elements, gridId);
   const boxes = new Map();
   for (const cell of cells) {
-    const at = (rowsMode ? cell.customData.r : cell.customData.c) | 0;
+    // a merged cell takes the drag when the resized track is one of its own:
+    // the track it starts on gets the new size, one it covers stretches by delta
+    const { r0, c0, r1, c1 } = cellRange(cell);
+    const from = rowsMode ? r0 : c0;
+    const to = rowsMode ? r1 : c1;
     const box = { x: cell.x, y: cell.y, width: cell.width, height: cell.height };
-    if (at === index) {
-      if (rowsMode) box.height = next;
-      else box.width = next;
-    } else if (at > index) {
+    if (index >= from && index <= to) {
+      // the cell keeps whatever size it had and takes the track's delta: for a
+      // plain cell that lands on `next`, for a merged one it stretches by delta
+      if (rowsMode) box.height = cell.height + delta;
+      else box.width = cell.width + delta;
+    } else if (from > index) {
       if (rowsMode) box.y = cell.y + delta;
       else box.x = cell.x + delta;
     }
@@ -1159,6 +1208,211 @@ function resizeTrack(elements, gridId, { axis, index, size, min, max, rewrap = t
     return el;
   });
   return { elements: out, changed, size: next, previous };
+}
+
+/* ------------------------------------------------------------ merge / split */
+
+/**
+ * Merge the cells covering one rectangular range of tracks into a single cell.
+ *
+ * The top-left cell survives (same id, so its text stays bound); the cells it
+ * swallows are removed together with their texts. A merge is refused when the
+ * range is not fully tiled by whole cells, or when any row/column inside it
+ * would be left without a plain cell to describe its size — the table's
+ * geometry is derived from its cells, so a track with no witness has no size.
+ */
+export function mergeGridRange(elements, gridId, range) {
+  const list = elements || [];
+  const cells = gridCells(list, gridId);
+  const r0 = Math.min(Number(range?.r0) | 0, Number(range?.r1) | 0);
+  const r1 = Math.max(Number(range?.r0) | 0, Number(range?.r1) | 0);
+  const c0 = Math.min(Number(range?.c0) | 0, Number(range?.c1) | 0);
+  const c1 = Math.max(Number(range?.c0) | 0, Number(range?.c1) | 0);
+  if (r1 <= r0 && c1 <= c0) return { elements: list, changed: 0, reason: "single" };
+
+  const touching = cells.filter((cell) => {
+    const span = cellRange(cell);
+    return span.r1 >= r0 && span.r0 <= r1 && span.c1 >= c0 && span.c0 <= c1;
+  });
+  const inside = touching.filter((cell) => {
+    const span = cellRange(cell);
+    return span.r0 >= r0 && span.r1 <= r1 && span.c0 >= c0 && span.c1 <= c1;
+  });
+  // a range only merges when nothing pokes out of it: half a neighbour would leave a hole
+  if (!inside.length || inside.length !== touching.length) return { elements: list, changed: 0, reason: "range" };
+
+  const cover = new Set();
+  for (const cell of inside) {
+    const span = cellRange(cell);
+    for (let r = span.r0; r <= span.r1; r += 1) {
+      for (let c = span.c0; c <= span.c1; c += 1) cover.add(`${r}:${c}`);
+    }
+  }
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      if (!cover.has(`${r}:${c}`)) return { elements: list, changed: 0, reason: "range" };
+    }
+  }
+
+  const keep = new Set(inside.map((cell) => cell.id));
+  const outside = cells.filter((cell) => !keep.has(cell.id));
+  const witness = (index, axis) =>
+    outside.some((cell) => {
+      const span = cellRange(cell);
+      return axis === "row" ? index >= span.r0 && index <= span.r1 : index >= span.c0 && index <= span.c1;
+    });
+  for (let r = r0; r <= r1; r += 1) if (!witness(r, "row")) return { elements: list, changed: 0, reason: "row" };
+  for (let c = c0; c <= c1; c += 1) if (!witness(c, "col")) return { elements: list, changed: 0, reason: "col" };
+
+  const left = Math.min(...inside.map((el) => el.x));
+  const top = Math.min(...inside.map((el) => el.y));
+  const right = Math.max(...inside.map((el) => el.x + el.width));
+  const bottom = Math.max(...inside.map((el) => el.y + el.height));
+  const host =
+    inside.find((el) => {
+      const span = cellRange(el);
+      return span.r0 === r0 && span.c0 === c0;
+    }) ?? inside[0];
+  const drop = new Set(inside.filter((el) => el.id !== host.id).map((el) => el.id));
+  const dropText = new Set(
+    list.filter((el) => el.type === "text" && el.containerId && drop.has(el.containerId)).map((el) => el.id),
+  );
+
+  const merged = bumpElement(host, {
+    x: round(left),
+    y: round(top),
+    width: round(right - left),
+    height: round(bottom - top),
+    customData: {
+      ...host.customData,
+      r: r0,
+      c: c0,
+      rowSpan: r1 - r0 + 1,
+      colSpan: c1 - c0 + 1,
+      cw: round(right - left),
+      rh: round(bottom - top),
+    },
+  });
+
+  const out = [];
+  for (const el of list) {
+    if (el.id === host.id) {
+      out.push(merged);
+      continue;
+    }
+    if (drop.has(el.id) || dropText.has(el.id)) continue;
+    out.push(el);
+  }
+  return { elements: healGrid(out, gridId) ?? out, changed: 1, cellId: merged.id };
+}
+
+/** Split a merged cell back into the plain cells of its tracks. */
+export function splitGridCell(elements, gridId, cellId) {
+  const list = elements || [];
+  const cell = gridCells(list, gridId).find((el) => el.id === cellId);
+  if (!cell) return { elements: list, changed: 0, reason: "missing" };
+  const { rowSpan, colSpan } = cellSpan(cell);
+  if (rowSpan <= 1 && colSpan <= 1) return { elements: list, changed: 0, reason: "single" };
+  const metrics = gridMetrics(list, gridId);
+  if (!metrics) return { elements: list, changed: 0, reason: "missing" };
+  const { r0, c0, r1, c1 } = cellRange(cell);
+  const rows = metrics.rows.filter((row) => row.r >= r0 && row.r <= r1);
+  const cols = metrics.cols.filter((col) => col.c >= c0 && col.c <= c1);
+  if (rows.length !== rowSpan || cols.length !== colSpan) return { elements: list, changed: 0, reason: "range" };
+
+  const groupId = `g${gridId}`;
+  const fresh = [];
+  let first = true;
+  for (const row of rows) {
+    for (const col of cols) {
+      const base = {
+        x: round(col.left),
+        y: round(row.top),
+        width: round(col.width),
+        height: round(row.height),
+      };
+      if (first) {
+        const cd = { ...cell.customData, r: row.r, c: col.c, cw: base.width, rh: base.height };
+        delete cd.rowSpan;
+        delete cd.colSpan;
+        fresh.push(bumpElement(cell, { ...base, customData: cd }));
+        first = false;
+        continue;
+      }
+      const cd = { ...cell.customData, r: row.r, c: col.c, cw: base.width, rh: base.height };
+      delete cd.rowSpan;
+      delete cd.colSpan;
+      const clone = {
+        ...cell,
+        ...base,
+        id: nextId("rect"[0]),
+        groupIds: cell.groupIds?.length ? cell.groupIds : [groupId],
+        seed: randInt(2 ** 31),
+        version: 1,
+        versionNonce: randInt(2 ** 31),
+        updated: Date.now(),
+        customData: cd,
+      };
+      fresh.push(clone);
+    }
+  }
+
+  const out = [];
+  for (const el of list) {
+    if (el.id === cell.id) {
+      out.push(...fresh);
+      continue;
+    }
+    out.push(el);
+  }
+  return { elements: healGrid(out, gridId) ?? out, changed: 1, cellIds: fresh.map((el) => el.id) };
+}
+
+/**
+ * Re-apply merge spans to a freshly rebuilt grid: cells that were merged keep
+ * their single element (and its text) instead of coming back as loose cells.
+ * `rects` are given in the new track numbering.
+ */
+export function applySpanRects(cells, gridId, rects) {
+  let out = cells || [];
+  for (const rect of rects || []) {
+    const r0 = Number(rect?.r) | 0;
+    const c0 = Number(rect?.c) | 0;
+    const rowSpan = Number(rect?.rowSpan) > 1 ? Number(rect.rowSpan) | 0 : 1;
+    const colSpan = Number(rect?.colSpan) > 1 ? Number(rect.colSpan) | 0 : 1;
+    if (rowSpan <= 1 && colSpan <= 1) continue;
+    const r1 = r0 + rowSpan - 1;
+    const c1 = c0 + colSpan - 1;
+    const inside = out.filter((el) => {
+      if (!isGridCell(el, gridId)) return false;
+      const r = el.customData.r | 0;
+      const c = el.customData.c | 0;
+      return r >= r0 && r <= r1 && c >= c0 && c <= c1;
+    });
+    if (inside.length !== rowSpan * colSpan) continue;
+    const left = Math.min(...inside.map((el) => el.x));
+    const top = Math.min(...inside.map((el) => el.y));
+    const right = Math.max(...inside.map((el) => el.x + el.width));
+    const bottom = Math.max(...inside.map((el) => el.y + el.height));
+    const host = inside.find((el) => (el.customData.r | 0) === r0 && (el.customData.c | 0) === c0) ?? inside[0];
+    const merged = bumpElement(host, {
+      x: round(left),
+      y: round(top),
+      width: round(right - left),
+      height: round(bottom - top),
+      customData: {
+        ...host.customData,
+        r: r0,
+        c: c0,
+        rowSpan,
+        colSpan,
+        cw: round(right - left),
+        rh: round(bottom - top),
+      },
+    });
+    out = out.filter((el) => el.id === host.id || !inside.includes(el)).map((el) => (el.id === host.id ? merged : el));
+  }
+  return out;
 }
 
 /**

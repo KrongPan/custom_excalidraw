@@ -165,6 +165,21 @@ class CDP {
     }
   }
 
+  // CDP modifier bits: Alt 1, Ctrl 2, Meta 4, Shift 8
+  async clickPointWith(x, y, modifiers) {
+    for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+      await this.send("Input.dispatchMouseEvent", {
+        type,
+        x,
+        y,
+        button: type === "mouseMoved" ? "none" : "left",
+        buttons: type === "mousePressed" ? 1 : 0,
+        clickCount: 1,
+        modifiers,
+      });
+    }
+  }
+
   async hold(selector, ms) {
     const box = await this.evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
@@ -858,6 +873,20 @@ async function openEditor(boardId = BOARD) {
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
       await sleep(90);
     };
+    // a grid rebuild scrolls the rebuilt table into view with an animation, so a
+    // point measured before it finishes points at the wrong cell by click time
+    const camSettled = async () => {
+      let prev = null;
+      for (let i = 0; i < 24; i += 1) {
+        const now = await cdp.evaluate(
+          `(() => { const s = window.__boardsApi.getAppState(); return [Math.round(s.scrollX || 0), Math.round(s.scrollY || 0)]; })()`,
+        );
+        if (prev && prev[0] === now[0] && prev[1] === now[1]) return now;
+        prev = now;
+        await sleep(110);
+      }
+      return prev;
+    };
     const waitPill = (selector, at) =>
       cdp.waitFor(
         `(() => {
@@ -1272,6 +1301,205 @@ async function openEditor(boardId = BOARD) {
     await sleep(380);
     const cleared = await selection();
     check("a click on empty canvas drops the cell pick", cleared.count === 0, JSON.stringify(cleared));
+
+    /* ------------------------ shift-click a block, merge it, split it back */
+    if (!(await cdp.evaluate(`!!document.querySelector(".panel.open")`))) await pickTool("สร้างตาราง");
+    const cellCard = () =>
+      cdp.evaluate(`(() => {
+        const el = document.querySelector(".cell-edits");
+        if (!el) return null;
+        return {
+          hint: el.querySelector(".hint")?.textContent.trim() ?? "",
+          buttons: [...el.querySelectorAll("button")].map((b) => ({ text: b.textContent.trim(), disabled: b.disabled })),
+        };
+      })()`);
+    const clickCardButton = async (label) => {
+      const box = await cdp.evaluate(`(() => {
+        const el = [...document.querySelectorAll(".cell-edits button")]
+          .find((b) => b.textContent.trim() === ${JSON.stringify(label)});
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`);
+      if (!box) throw new Error(`no ${label} button in the cell card`);
+      await cdp.clickPoint(box.x, box.y);
+      await sleep(460);
+    };
+    const mergeShape = () =>
+      cdp.evaluate(`(() => {
+        const cells = window.__boardsApi.getSceneElements().filter(
+          (el) => !el.isDeleted && el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null,
+        );
+        const merged = cells
+          .filter((el) => (el.customData.rowSpan || 1) > 1 || (el.customData.colSpan || 1) > 1)
+          .map((el) => ({ r: el.customData.r, c: el.customData.c, rowSpan: el.customData.rowSpan || 1, colSpan: el.customData.colSpan || 1 }));
+        return { cells: cells.length, merged };
+      })()`);
+
+    const alphaPoint = await cellPoint(0, 0);
+    await cdp.clickPoint(alphaPoint.x, alphaPoint.y);
+    await sleep(280);
+    const neighbourPoint = await cellPoint(0, 1);
+    await cdp.clickPointWith(neighbourPoint.x, neighbourPoint.y, 8);
+    await sleep(340);
+    const block = await selection();
+    const blockCard = await cellCard();
+    const mergeButton = blockCard?.buttons.find((b) => b.text === "รวมช่อง");
+    check(
+      "shift-click builds a block of cells",
+      block.cells.length === 2 && mergeButton?.disabled === false,
+      JSON.stringify({ cells: block.cells.length, hint: blockCard?.hint, buttons: blockCard?.buttons }),
+    );
+
+    const beforeMerge = await mergeShape();
+    await clickCardButton("รวมช่อง");
+    const afterMerge = await mergeShape();
+    const mergedCard = await cellCard();
+    check(
+      "merging a block turns it into one cell",
+      afterMerge.cells === beforeMerge.cells - 1 &&
+        afterMerge.merged.length === 1 &&
+        afterMerge.merged[0].r === 0 &&
+        afterMerge.merged[0].c === 0 &&
+        afterMerge.merged[0].colSpan === 2 &&
+        afterMerge.merged[0].rowSpan === 1,
+      JSON.stringify({ before: beforeMerge.cells, after: afterMerge }),
+    );
+    const mergedText = await textCell();
+    check(
+      "the merged cell keeps the top-left text",
+      mergedText?.r === 0 && mergedText?.c === 0,
+      JSON.stringify(mergedText),
+    );
+    check(
+      "the panel offers split for a merged cell",
+      mergedCard?.buttons.find((b) => b.text === "แยกช่อง")?.disabled === false &&
+        mergedCard?.buttons.find((b) => b.text === "รวมช่อง")?.disabled === true,
+      JSON.stringify(mergedCard?.buttons),
+    );
+
+    await clickCardButton("แยกช่อง");
+    const afterSplit = await mergeShape();
+    const splitText = await textCell();
+    check(
+      "splitting the merged cell puts both cells back",
+      afterSplit.cells === beforeMerge.cells && afterSplit.merged.length === 0,
+      JSON.stringify(afterSplit),
+    );
+    check(
+      "the word stays in its cell through a merge and split",
+      splitText?.r === 0 && splitText?.c === 0,
+      JSON.stringify(splitText),
+    );
+
+    /* a square block merges too, so cells can be merged in both directions */
+    const square = [
+      [2, 0],
+      [2, 1],
+      [3, 0],
+      [3, 1],
+    ];
+    for (let i = 0; i < square.length; i += 1) {
+      await camSettled();
+      const point = await cellPoint(square[i][0], square[i][1]);
+      if (i === 0) await cdp.clickPoint(point.x, point.y);
+      else await cdp.clickPointWith(point.x, point.y, 8);
+      await sleep(260);
+    }
+    const squareCard = await cellCard();
+    await clickCardButton("รวมช่อง");
+    const squareMerged = await mergeShape();
+    check(
+      "a 2 x 2 block merges into one square cell",
+      squareMerged.merged.length === 1 &&
+        squareMerged.merged[0].rowSpan === 2 &&
+        squareMerged.merged[0].colSpan === 2,
+      JSON.stringify({ card: squareCard?.buttons, merged: squareMerged.merged }),
+    );
+    await camSettled();
+    const squarePoint = await cellPoint(2, 0);
+    await cdp.clickPoint(squarePoint.x, squarePoint.y);
+    await sleep(280);
+    await clickCardButton("แยกช่อง");
+    const squareBack = await mergeShape();
+    check(
+      "the square cell splits into four again",
+      squareBack.cells === beforeMerge.cells && squareBack.merged.length === 0,
+      JSON.stringify(squareBack),
+    );
+
+    /* ------------------------ a merge survives the table growing around it */
+    await camSettled();
+    const tallTop = await cellPoint(1, 0);
+    await cdp.clickPoint(tallTop.x, tallTop.y);
+    await sleep(260);
+    const tallBottom = await cellPoint(2, 0);
+    await cdp.clickPointWith(tallBottom.x, tallBottom.y, 8);
+    await sleep(320);
+    await clickCardButton("รวมช่อง");
+    const tall = await mergeShape();
+    check(
+      "a vertical block merges into one tall cell",
+      tall.merged.length === 1 &&
+        tall.merged[0].r === 1 &&
+        tall.merged[0].c === 0 &&
+        tall.merged[0].rowSpan === 2 &&
+        tall.merged[0].colSpan === 1,
+      JSON.stringify(tall),
+    );
+
+    // drop a row inside the merged cell: it should stretch, not tear
+    await hoverLine("row", 2);
+    await waitPill(".grid-add-insert", 2);
+    await clickPill(".grid-add-insert");
+    await cdp.waitFor(
+      `(() => {
+        const el = window.__boardsApi.getSceneElements().find(
+          (x) => !x.isDeleted && x.customData?.grid === ${JSON.stringify(tableGrid)} && (x.customData.rowSpan || 1) > 1,
+        );
+        return !!el && el.customData.rowSpan === 3;
+      })()`,
+      { label: "merged cell stretched to three rows" },
+    );
+    const stretched = await mergeShape();
+    check(
+      "a row inserted inside a merged cell stretches it",
+      stretched.merged[0]?.rowSpan === 3 && stretched.merged[0]?.colSpan === 1,
+      JSON.stringify(stretched.merged),
+    );
+
+    await hoverCell(2, 2);
+    await waitPill(".grid-add-row-del", 2);
+    await clickPill(".grid-add-row-del");
+    await cdp.waitFor(
+      `(() => {
+        const el = window.__boardsApi.getSceneElements().find(
+          (x) => !x.isDeleted && x.customData?.grid === ${JSON.stringify(tableGrid)} && (x.customData.rowSpan || 1) > 1,
+        );
+        return !!el && el.customData.rowSpan === 2;
+      })()`,
+      { label: "merged cell back to two rows" },
+    );
+    const mergedBack = await mergeShape();
+    check(
+      "removing a row inside the merged cell shrinks it back",
+      mergedBack.merged[0]?.rowSpan === 2,
+      JSON.stringify(mergedBack.merged),
+    );
+
+    await camSettled();
+    const tallAgain = await cellPoint(1, 0);
+    await cdp.clickPoint(tallAgain.x, tallAgain.y);
+    await sleep(300);
+    const tallSel = await selection();
+    const tallCard = await cellCard();
+    await clickCardButton("แยกช่อง");
+    const tallSplit = await mergeShape();
+    check(
+      "the tall cell splits back into two cells",
+      tallSplit.cells === beforeMerge.cells && tallSplit.merged.length === 0,
+      JSON.stringify({ split: tallSplit, pick: tallSel, card: tallCard, point: tallAgain }),
+    );
 
     /* ------------------------------------------- drag a cell border to size */
     const resizeTarget = () =>

@@ -805,6 +805,27 @@ body {
   margin: 0;
 }
 
+.cell-edits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--glass-line);
+  border-radius: 10px;
+  background: var(--chip-soft);
+  box-shadow: var(--ring);
+}
+.cell-edits .row {
+  gap: 8px;
+}
+.panel .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.panel .btn:disabled:hover {
+  background: var(--chip);
+}
+
 .selected-grid {
   display: flex;
   flex-direction: column;

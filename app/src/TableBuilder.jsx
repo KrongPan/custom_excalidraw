@@ -33,7 +33,7 @@ function NumberField({ label, value, limits, fallback, step = 1, onChange }) {
   );
 }
 
-export default function TableBuilder({ open, onClose, onInsert, selected, onUpdate }) {
+export default function TableBuilder({ open, onClose, onInsert, selected, cells, onMerge, onSplit, onUpdate }) {
   const [title, setTitle] = useState("");
   const [columns, setColumns] = useState(3);
   const [rows, setRows] = useState(4);
@@ -133,6 +133,43 @@ export default function TableBuilder({ open, onClose, onInsert, selected, onUpda
             </div>
           </>
         )}
+
+        {/* A cell can be picked on its own (shift-click adds more), so this is
+            where a block becomes one cell and a merged cell becomes cells again. */}
+        {cells ? (
+          <div className="cell-edits">
+            <span className="hint">
+              {cells.count === 1
+                ? `เลือกช่อง ${cells.rows} × ${cells.cols}`
+                : `เลือก ${cells.count} ช่อง · ${cells.rows} × ${cells.cols}`}
+            </span>
+            <div className="row">
+              <button
+                type="button"
+                className="btn grow"
+                disabled={!cells.canMerge}
+                onClick={() => run(() => onMerge(), "รวมช่องแล้ว")}
+              >
+                รวมช่อง
+              </button>
+              <button
+                type="button"
+                className="btn grow"
+                disabled={!cells.canSplit}
+                onClick={() => run(() => onSplit(), "แยกช่องแล้ว")}
+              >
+                แยกช่อง
+              </button>
+            </div>
+            <p className="hint">
+              {cells.canMerge
+                ? "ช่องบนซ้ายเก็บข้อความไว้ ช่องอื่นในบล็อกถูกล้าง"
+                : cells.canSplit
+                  ? "ช่องนี้ถูกรวมไว้ — แยกกลับเป็นช่องเดี่ยวได้"
+                  : "กด Shift+คลิกเพื่อเลือกหลายช่องให้ติดกันแล้วรวม"}
+            </p>
+          </div>
+        ) : null}
 
         <div className="row">
           <label className="grow">

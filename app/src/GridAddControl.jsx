@@ -188,6 +188,19 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
         found = { grid: entry.grid, kind: entry.kind, geometry };
       }
       if (!found) return null;
+      // A merged cell owns the lines that run through it: its centre sits exactly
+      // on the boundary of the rows it covers, so without this a click on the
+      // middle of a merged cell would pick the whole table. The pill still offers
+      // an insert there; the press picks the cell, which is what split acts on.
+      for (const el of scene) {
+        if (el.isDeleted || el.customData?.grid !== found.grid) continue;
+        const rowSpan = el.customData?.rowSpan || 1;
+        const colSpan = el.customData?.colSpan || 1;
+        if (rowSpan === 1 && colSpan === 1) continue;
+        if (sceneX < el.x || sceneX > el.x + el.width) continue;
+        if (sceneY < el.y || sceneY > el.y + el.height) continue;
+        return { mode: "cell", kind: found.kind, grid: found.grid, row: el.customData.r | 0, col: el.customData.c | 0 };
+      }
       // a press right on a border picks the whole table: the line is already the
       // table-level surface (its pill inserts), the inside of a cell is a cell
       const onLine =
@@ -204,21 +217,32 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
       // pressing a pill must not disturb the pin it belongs to; any other press
       // asks the next frame to re-pin under the pointer or drop the old pin
       const chrome = event.target instanceof Element && event.target.closest(IGNORE);
+      // shift/meta/ctrl turns the pick into "add to the block I am building",
+      // which is how a range of cells gets selected for a merge
+      const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+      const cell = chrome ? null : cellAt(event.clientX, event.clientY);
       pressRef.current =
-        event.button === 0 && !chrome && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey
-          ? { x: event.clientX, y: event.clientY, cell: chrome ? null : cellAt(event.clientX, event.clientY) }
+        event.button === 0 && !chrome && !event.altKey
+          ? { x: event.clientX, y: event.clientY, cell, additive }
           : null;
+      // A modifier press on a cell is building a block for a merge, not a native
+      // "add this whole group to the selection": keeping Excalidraw out of the
+      // press leaves the cells picked so far intact for the toggle on release.
+      if (additive && cell?.mode === "cell") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       if (event.target instanceof Element && event.target.closest(".grid-add")) return;
       pinPendingRef.current = true;
     };
-    /* A plain click on a cell (no drag, no modifier) picks that one cell; the
+    /* A click on a cell picks that one cell (modifier = add to the block); the
        table's own group selection would otherwise swallow every cell. */
     const onUp = (event) => {
       const down = pressRef.current;
       pressRef.current = null;
       if (!down || !down.cell || event.button !== 0) return;
       if (Math.abs(event.clientX - down.x) > 4 || Math.abs(event.clientY - down.y) > 4) return;
-      pickRef.current?.(down.cell);
+      pickRef.current?.(down.cell, { additive: down.additive });
     };
     const onLeave = () => {
       pointerRef.current = null;

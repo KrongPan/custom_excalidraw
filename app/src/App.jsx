@@ -23,14 +23,18 @@ import Minimap from "./Minimap.jsx";
 import LassoTool, { IconLasso } from "./tools/LassoTool.jsx";
 import ToolMenu from "./ToolMenu.jsx";
 import {
+  applySpanRects,
   attachCellText,
   buildGrid,
+  cellSpan,
   healGrid,
   gridMetrics,
   isGridCell,
   matchSizes,
+  mergeGridRange,
   resizeGridColumn,
   resizeGridRow,
+  splitGridCell,
 } from "./table.js";
 import { applyCardinalityToElements, connectGrids, describeRelation, syncRelations } from "./relations.js";
 
@@ -38,6 +42,72 @@ const SAVE_DELAY = 900; // http fallback (no websocket)
 const LIVE_DELAY = 300; // websocket push while several people edit
 const ARM_DELAY = 1200; // ignore the onChange burst that follows the initial load
 const SAVE_APP_STATE = ["viewBackgroundColor", "gridSize", "gridStep", "gridModeEnabled", "theme"];
+
+/* The merge/split buttons need to know what is picked: one cell that may be
+   split, or a block that may be merged into one. The merge dry-run is the honest
+   test — it refuses a ragged selection and one that would orphan a track. */
+const sameCellSel = (a, b) => (a?.key ?? "") === (b?.key ?? "");
+
+function describeCellSelection(elements, picked) {
+  if (!picked?.length) return null;
+  const grid = picked[0].grid;
+  if (!picked.every((cell) => cell.grid === grid)) return null;
+  if (picked.length === 1) {
+    const cell = picked[0];
+    return {
+      key: `${cell.id}:${cell.rowSpan}x${cell.colSpan}`,
+      grid,
+      count: 1,
+      rows: cell.rowSpan,
+      cols: cell.colSpan,
+      canMerge: false,
+      canSplit: cell.rowSpan > 1 || cell.colSpan > 1,
+    };
+  }
+  const r0 = Math.min(...picked.map((cell) => cell.r));
+  const r1 = Math.max(...picked.map((cell) => cell.r + cell.rowSpan - 1));
+  const c0 = Math.min(...picked.map((cell) => cell.c));
+  const c1 = Math.max(...picked.map((cell) => cell.c + cell.colSpan - 1));
+  const probe = mergeGridRange(elements, grid, { r0, c0, r1, c1 });
+  return {
+    key: `${picked.map((cell) => cell.id).sort().join(",")}:${probe.changed ? 1 : 0}`,
+    grid,
+    count: picked.length,
+    rows: r1 - r0 + 1,
+    cols: c1 - c0 + 1,
+    canMerge: probe.changed === 1,
+    canSplit: false,
+  };
+}
+
+/* A merged rectangle survives an inserted track: it moves down/right when the
+   new track lands above or before it, grows when the track lands inside it, and
+   stays put when the track lands after it. */
+const spanOnInsert = (axis, at) => (span) => {
+  if (axis === "row") {
+    if (at <= span.r) return { ...span, r: span.r + 1 };
+    if (at <= span.r + span.rowSpan - 1) return { ...span, rowSpan: span.rowSpan + 1 };
+    return span;
+  }
+  if (at <= span.c) return { ...span, c: span.c + 1 };
+  if (at <= span.c + span.colSpan - 1) return { ...span, colSpan: span.colSpan + 1 };
+  return span;
+};
+
+/* A merged rectangle survives a dropped track: it moves up when a track above
+   it went, shrinks when one of its own tracks went, and stays put otherwise.
+   When it falls back to a single cell there is nothing left to merge. */
+const spanOnDrop = (axis, at) => (span) => {
+  const rows = axis === "row";
+  const start = rows ? span.r : span.c;
+  const size = rows ? span.rowSpan : span.colSpan;
+  if (at < start) return rows ? { ...span, r: start - 1 } : { ...span, c: start - 1 };
+  if (at > start + size - 1) return span;
+  const left = size - 1;
+  const other = rows ? span.colSpan : span.rowSpan;
+  if (left <= 1 && other <= 1) return null;
+  return rows ? { ...span, rowSpan: left } : { ...span, colSpan: left };
+};
 
 /* Inline icons: the board chrome needs only a back arrow, a tools glyph and the
    table button, not an icon dependency. */
@@ -292,6 +362,9 @@ export default function App() {
   const [selectedRelation, setSelectedRelation] = useState(null);
   // class grids highlighted together — the ER panel links two of them
   const [classPicks, setClassPicks] = useState([]);
+  // the picked table cells (one, or a block built with shift-click) — the merge
+  // and split buttons act on exactly this, and nothing when it is null
+  const [cellSel, setCellSel] = useState(null);
   const [peers, setPeers] = useState([]);
   const [live, setLive] = useState("connecting"); // connecting | open | closed
   const [title, setTitle] = useState(boardId || "");
@@ -741,8 +814,13 @@ export default function App() {
     if (!rects.length) return null;
     const metrics = gridMetrics(elements, gridId);
     const first = rects[0].customData;
-    const rows = Math.max(...rects.map((x) => x.customData?.r ?? 0)) + 1;
-    const cols = Math.max(...rects.map((x) => x.customData?.c ?? 0)) + 1;
+    // a merged cell covers several tracks: count to its far edge, not its start
+    const rows = Math.max(...rects.map((x) => (x.customData?.r ?? 0) + cellSpan(x).rowSpan));
+    const cols = Math.max(...rects.map((x) => (x.customData?.c ?? 0) + cellSpan(x).colSpan));
+    const merged = rects.filter((x) => {
+      const span = cellSpan(x);
+      return span.rowSpan > 1 || span.colSpan > 1;
+    }).length;
     const head = elements.find((el) => !el.isDeleted && el.type === "text" && el.customData?.grid === gridId && el.customData?.title);
     return {
       kind: "grid",
@@ -757,6 +835,7 @@ export default function App() {
       height: metrics ? Math.round(metrics.bounds.height) : 0,
       rowHeights: metrics ? metrics.rows.map((row) => Math.round(row.height)) : [],
       colWidths: metrics ? metrics.cols.map((col) => Math.round(col.width)) : [],
+      merged,
     };
   }, []);
 
@@ -771,6 +850,7 @@ export default function App() {
     a.height === b.height &&
     a.color === b.color &&
     a.headerRow === b.headerRow &&
+    a.merged === b.merged &&
     a.rowHeights.join() === b.rowHeights.join() &&
     a.colWidths.join() === b.colWidths.join();
 
@@ -838,6 +918,22 @@ export default function App() {
         picks.push({ grid: gridId, title: describeClass(elements, gridId)?.title || "class" });
       }
       setClassPicks((prev) => (sameClassPicks(prev, picks) ? prev : picks));
+
+      const cellPicks = [];
+      for (const el of elements) {
+        if (!selectedIds[el.id] || el.isDeleted || !isGridCell(el)) continue;
+        const { rowSpan, colSpan } = cellSpan(el);
+        cellPicks.push({
+          id: el.id,
+          grid: el.customData.grid,
+          r: el.customData.r | 0,
+          c: el.customData.c | 0,
+          rowSpan,
+          colSpan,
+        });
+      }
+      const cellSummary = describeCellSelection(elements, cellPicks);
+      setCellSel((prev) => (sameCellSel(prev, cellSummary) ? prev : cellSummary));
 
       if (Date.now() < armedAtRef.current) {
         // The burst that follows a load is Excalidraw restoring what the file
@@ -1301,7 +1397,9 @@ export default function App() {
     // `mapText` maps a rebuilt cell's r/c back to the track it came from. Texts
     // are keyed by r:c, so a track inserted or dropped anywhere would otherwise
     // hand every cell below it its neighbour's words.
-    (meta, spec, { mapText } = {}) => {
+    // `mapSpan` moves the merged rectangles of the old grid onto the new tracks;
+    // a span that loses its size (a track dropped out of it) comes back plain.
+    (meta, spec, { mapText, mapSpan } = {}) => {
       const api = apiRef.current;
       if (!api) throw new Error("editor ยังไม่พร้อม");
       if (!meta?.grid) throw new Error("คลิกเลือกช่องในตารางก่อน");
@@ -1356,7 +1454,20 @@ export default function App() {
         subtitle: spec.subtitle ?? subEl?.text ?? "",
       });
 
-      const placed = elements.map((el) => ({ ...el, x: el.x + originX, y: el.y + originY }));
+      const spans = [];
+      for (const el of cells) {
+        const { rowSpan, colSpan } = cellSpan(el);
+        if (rowSpan === 1 && colSpan === 1) continue;
+        spans.push({ r: el.customData.r | 0, c: el.customData.c | 0, rowSpan, colSpan });
+      }
+      const moveSpan = typeof mapSpan === "function" ? mapSpan : (span) => span;
+      const merged = spans.map(moveSpan).filter(Boolean);
+
+      const placed = applySpanRects(
+        elements.map((el) => ({ ...el, x: el.x + originX, y: el.y + originY })),
+        meta.grid,
+        merged,
+      );
       // cells carry no text element until they hold something — restore the ones with text
       const restored = [];
       for (const el of placed) {
@@ -1439,6 +1550,7 @@ export default function App() {
           },
           {
             mapText: (r, c) => (r === insertAt ? null : [r < insertAt ? r : r - 1, c]),
+            mapSpan: spanOnInsert("row", insertAt),
           },
         );
       }
@@ -1455,6 +1567,7 @@ export default function App() {
         },
         {
           mapText: (r, c) => (c === insertAt ? null : [r, c < insertAt ? c : c - 1]),
+          mapSpan: spanOnInsert("col", insertAt),
         },
       );
     },
@@ -1484,7 +1597,7 @@ export default function App() {
           },
           // every surviving row below the dropped one moves up, so its old r is
           // one more than the new one
-          { mapText: (r, c) => [r < dropAt ? r : r + 1, c] },
+          { mapText: (r, c) => [r < dropAt ? r : r + 1, c], mapSpan: spanOnDrop("row", dropAt) },
         );
       }
       if (colWidths.length <= 1) return 0;
@@ -1499,7 +1612,7 @@ export default function App() {
           rowHeights,
           colWidths: colWidths.filter((_, index) => index !== dropAt),
         },
-        { mapText: (r, c) => [r, c < dropAt ? c : c + 1] },
+        { mapText: (r, c) => [r, c < dropAt ? c : c + 1], mapSpan: spanOnDrop("col", dropAt) },
       );
     },
     [applyGrid, gridElements],
@@ -1863,7 +1976,34 @@ export default function App() {
      the grid can later act on a single cell (split/merge) rather than on every
      element of the table. Inside the table's group Excalidraw keeps one member
      selectable; the next click outside the group leaves it again. */
-  const pickCell = useCallback((hit) => {
+  /**
+   * Excalidraw touches the selection again while the same click finishes (a cell
+   * that carries a text element makes it pick the whole group), so a pick is
+   * asserted once more on the next frame unless the click opened a text editor.
+   */
+  const assertSelection = useCallback((selectedElementIds, selectedGroupIds = {}) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const wanted = Object.keys(selectedElementIds).sort().join(",");
+    const wantedGroups = Object.keys(selectedGroupIds).sort().join(",");
+    // late enough that Excalidraw's own pointerup state has settled, early enough
+    // that a person sees only the pick they asked for; a focused textarea means a
+    // double click opened the cell editor and must be left alone
+    setTimeout(() => {
+      const focus = document.activeElement;
+      if (focus && focus.tagName === "TEXTAREA") return;
+      const state = api.getAppState();
+      const now = Object.keys(state.selectedElementIds || {}).sort().join(",");
+      const nowGroups = Object.keys(state.selectedGroupIds || {}).sort().join(",");
+      if (now === wanted && nowGroups === wantedGroups) return;
+      api.updateScene({
+        appState: { selectedElementIds, selectedGroupIds, editingGroupId: null },
+        captureUpdate: "NEVER",
+      });
+    }, 60);
+  }, []);
+
+  const pickCell = useCallback((hit, options = {}) => {
     const api = apiRef.current;
     if (!api || !hit || hit.kind === "class") return;
     if (hit.mode === "grid") {
@@ -1877,22 +2017,34 @@ export default function App() {
         for (const groupId of el.groupIds || []) selectedGroupIds[groupId] = true;
       }
       api.updateScene({ appState: { selectedElementIds, selectedGroupIds, editingGroupId: null }, captureUpdate: "NEVER" });
+      assertSelection(selectedElementIds, selectedGroupIds);
       return;
     }
     if (hit.mode !== "cell") return;
-    const cell = api
-      .getSceneElements()
-      .find(
-        (el) =>
-          !el.isDeleted &&
-          el.customData?.grid === hit.grid &&
-          Number(el.customData?.r) === hit.row &&
-          Number(el.customData?.c) === hit.col,
-      );
+    const scene = api.getSceneElements();
+    const cell = scene.find(
+      (el) =>
+        !el.isDeleted &&
+        el.customData?.grid === hit.grid &&
+        Number(el.customData?.r) === hit.row &&
+        Number(el.customData?.c) === hit.col,
+    );
     if (!cell) return;
+    const selectedElementIds = {};
+    if (options.additive) {
+      // shift/meta-click builds a block to merge: keep the cells already picked
+      // and toggle this one, so a second click takes it back out
+      const now = api.getAppState().selectedElementIds || {};
+      for (const el of scene) {
+        if (el.isDeleted || !now[el.id] || !isGridCell(el)) continue;
+        selectedElementIds[el.id] = true;
+      }
+    }
+    if (selectedElementIds[cell.id]) delete selectedElementIds[cell.id];
+    else selectedElementIds[cell.id] = true;
     api.updateScene({
       appState: {
-        selectedElementIds: { [cell.id]: true },
+        selectedElementIds,
         selectedGroupIds: {},
         // staying out of Excalidraw's group-edit mode keeps the cell a normal
         // selection: a click on empty canvas or Escape clears it again
@@ -1900,7 +2052,73 @@ export default function App() {
       },
       captureUpdate: "NEVER",
     });
+    assertSelection(selectedElementIds);
+  }, [assertSelection]);
+
+  /** The picked cells as one list, straight off the live selection. */
+  const pickedCells = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return [];
+    const selected = api.getAppState().selectedElementIds || {};
+    const out = [];
+    for (const el of api.getSceneElements()) {
+      if (el.isDeleted || !selected[el.id] || !isGridCell(el)) continue;
+      const { rowSpan, colSpan } = cellSpan(el);
+      out.push({
+        id: el.id,
+        grid: el.customData.grid,
+        r: el.customData.r | 0,
+        c: el.customData.c | 0,
+        rowSpan,
+        colSpan,
+      });
+    }
+    return out;
   }, []);
+
+  /** Merge the picked block into its top-left cell (that cell keeps the text). */
+  const mergeSelectedCells = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return 0;
+    const pick = pickedCells();
+    if (pick.length < 2) throw new Error("คลิกเลือกอย่างน้อย 2 ช่องก่อน");
+    const grid = pick[0].grid;
+    if (!pick.every((cell) => cell.grid === grid)) throw new Error("รวมได้ทีละตาราง");
+    const r0 = Math.min(...pick.map((cell) => cell.r));
+    const r1 = Math.max(...pick.map((cell) => cell.r + cell.rowSpan - 1));
+    const c0 = Math.min(...pick.map((cell) => cell.c));
+    const c1 = Math.max(...pick.map((cell) => cell.c + cell.colSpan - 1));
+    const result = mergeGridRange(api.getSceneElements(), grid, { r0, c0, r1, c1 });
+    if (!result.changed) throw new Error("รวมได้เฉพาะช่องที่อยู่ติดกันเป็นสี่เหลี่ยม");
+    api.updateScene({
+      elements: result.elements,
+      appState: { selectedElementIds: { [result.cellId]: true }, selectedGroupIds: {}, editingGroupId: null },
+      captureUpdate: "IMMEDIATELY",
+    });
+    const after = api.getSceneElements();
+    setSelectedGrid(describeGrid(after, grid));
+    queueSave(after, api.getAppState(), api.getFiles());
+    return result.changed;
+  }, [describeGrid, pickedCells, queueSave]);
+
+  /** Split the one picked merged cell back into its tracks. */
+  const splitSelectedCell = useCallback(() => {
+    const api = apiRef.current;
+    if (!api) return 0;
+    const pick = pickedCells();
+    if (pick.length !== 1) throw new Error("เลือกช่องที่ถูกรวมไว้ช่องเดียว");
+    const result = splitGridCell(api.getSceneElements(), pick[0].grid, pick[0].id);
+    if (!result.changed) throw new Error("ช่องนี้ไม่ได้ถูกรวมไว้");
+    api.updateScene({
+      elements: result.elements,
+      appState: { selectedElementIds: { [result.cellIds[0]]: true }, selectedGroupIds: {}, editingGroupId: null },
+      captureUpdate: "IMMEDIATELY",
+    });
+    const after = api.getSceneElements();
+    setSelectedGrid(describeGrid(after, pick[0].grid));
+    queueSave(after, api.getAppState(), api.getFiles());
+    return result.changed;
+  }, [describeGrid, pickedCells, queueSave]);
 
   /** ER tool: link the two picked classes with one crowfoot arrow. */
   const connectPickedClasses = useCallback(() => {
@@ -2314,6 +2532,9 @@ export default function App() {
         onClose={() => setPanelOpen(false)}
         onInsert={insertTable}
         selected={selectedGrid}
+        cells={cellSel}
+        onMerge={mergeSelectedCells}
+        onSplit={splitSelectedCell}
         onUpdate={(spec) => applyGrid(selectedGrid, spec)}
       />
 
