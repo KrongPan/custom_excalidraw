@@ -876,6 +876,13 @@ body {
 .fatal .btn {
   margin-top: 6px;
 }
+.fatal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 14px;
+}
 .fatal.loading {
   color: var(--muted);
   text-align: center;

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
+import ErrorBoundary from "./ErrorBoundary.jsx";
+import { LANG_CODE } from "./i18n.js";
 import TableBuilder from "./TableBuilder.jsx";
 import ErBuilder from "./ErBuilder.jsx";
 import {
@@ -41,6 +43,7 @@ import { applyCardinalityToElements, connectGrids, describeRelation, syncRelatio
 const SAVE_DELAY = 900; // http fallback (no websocket)
 const LIVE_DELAY = 300; // websocket push while several people edit
 const ARM_DELAY = 1200; // ignore the onChange burst that follows the initial load
+const FETCH_TIMEOUT = 15000; // a stalled board request must not hang the editor forever
 const SAVE_APP_STATE = ["viewBackgroundColor", "gridSize", "gridStep", "gridModeEnabled", "theme"];
 
 /* The merge/split buttons need to know what is picked: one cell that may be
@@ -424,6 +427,10 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
+    // the browser paints its own chrome from this tag, so it has to follow the
+    // board's theme rather than the light one baked into index.html
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = theme === "dark" ? "#0f0f16" : "#f4f6ff";
     try {
       window.localStorage.setItem(THEME_KEY, theme);
     } catch {
@@ -480,6 +487,7 @@ export default function App() {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: "{}",
+          signal: AbortSignal.timeout(FETCH_TIMEOUT),
         });
         if (!res.ok) throw new Error(`สร้างกระดานไม่สำเร็จ (${res.status})`);
         const created = await res.json();
@@ -493,8 +501,8 @@ export default function App() {
       // editor, so the meta request resolves to null instead of rejecting
       const encoded = encodeURIComponent(boardId);
       const [res, metaRes] = await Promise.all([
-        fetch(`/api/boards/${encoded}`),
-        fetch(`/api/boards/${encoded}/meta`).catch(() => null),
+        fetch(`/api/boards/${encoded}`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) }),
+        fetch(`/api/boards/${encoded}/meta`, { signal: AbortSignal.timeout(FETCH_TIMEOUT) }).catch(() => null),
       ]);
       if (!res.ok) throw new Error(`โหลดกระดาน ${boardId} ไม่ได้ (${res.status})`);
       const data = await res.json();
@@ -516,7 +524,8 @@ export default function App() {
     })().catch((error) => {
       if (!alive) return;
       document.title = "ไม่พบกระดาน · Excalidraw boards";
-      setFatal(error?.message || String(error));
+      const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+      setFatal(timedOut ? "หมดเวลาโหลดกระดาน ลองโหลดหน้านี้อีกครั้ง" : error?.message || String(error));
       setPhase("error");
     });
 
@@ -629,13 +638,29 @@ export default function App() {
   }, [phase, toolsEpoch]);
 
   /* Crossing the phone line swaps in Excalidraw's mobile row, so the float effect
-     has to run again (float on desktop, clean up on phones). */
+     has to run again (float on desktop, clean up on phones). Excalidraw refreshes
+     its own breakpoints from a ResizeObserver that does not re-render, so on this
+     resize the old desktop row stays until the next one: force a render after the
+     observer has caught up. */
   useEffect(() => {
     if (phase !== "ready") return undefined;
     const query = window.matchMedia("(max-width: 560px)");
-    const onChange = () => setToolsEpoch((epoch) => epoch + 1);
+    let frame = 0;
+    const onChange = () => {
+      setToolsEpoch((epoch) => epoch + 1);
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          apiRef.current?.refresh();
+        });
+      });
+    };
     query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
+    return () => {
+      cancelAnimationFrame(frame);
+      query.removeEventListener("change", onChange);
+    };
   }, [phase]);
 
   /* The avatar stack lives in Excalidraw's own top-right menu row, immediately
@@ -713,6 +738,7 @@ export default function App() {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT),
       });
       if (!res.ok) throw new Error(await res.text());
       lastSavedRef.current = body;
@@ -1210,6 +1236,13 @@ export default function App() {
     let retry = 0;
     let reconnectTimer = 0;
 
+    /* One backoff for both ways the socket can fail. A constructor throw never
+       reaches onclose, so it used to leave the page offline for good. */
+    const scheduleReconnect = () => {
+      reconnectTimer = window.setTimeout(connect, Math.min(5000, 600 * 2 ** Math.min(retry, 4)));
+      retry += 1;
+    };
+
     const connect = () => {
       const existing = wsRef.current;
       // one socket per tab: a second one would show up as a second person
@@ -1229,6 +1262,7 @@ export default function App() {
         ws = new WebSocket(url);
       } catch {
         setLive("closed");
+        scheduleReconnect();
         return;
       }
       wsRef.current = ws;
@@ -1312,8 +1346,7 @@ export default function App() {
         // 4001 = another page carrying this tab's session id took the slot over
         // (a reload whose old page was still alive); reconnecting would fight it
         if (event?.code === 4001) return;
-        reconnectTimer = window.setTimeout(connect, Math.min(5000, 600 * 2 ** Math.min(retry, 4)));
-        retry += 1;
+        scheduleReconnect();
       };
 
       ws.onerror = () => {};
@@ -2473,21 +2506,24 @@ export default function App() {
       </a>
 
       <div className="canvas" ref={canvasRef}>
-        <Excalidraw
-          theme={theme}
-          initialData={{
-            elements: scene.elements || [],
-            appState: { ...(scene.appState || {}), theme },
-            files: scene.files || {},
-            scrollToContent: true,
-          }}
-          onChange={onChange}
-          onPointerUpdate={sendLaserPointer}
-          excalidrawAPI={(api) => {
-            apiRef.current = api;
-            window.__boardsApi = api; // handy for the e2e harness
-          }}
-        />
+        <ErrorBoundary boardId={boardId}>
+          <Excalidraw
+            langCode={LANG_CODE}
+            theme={theme}
+            initialData={{
+              elements: scene.elements || [],
+              appState: { ...(scene.appState || {}), theme },
+              files: scene.files || {},
+              scrollToContent: true,
+            }}
+            onChange={onChange}
+            onPointerUpdate={sendLaserPointer}
+            excalidrawAPI={(api) => {
+              apiRef.current = api;
+              window.__boardsApi = api; // handy for the e2e harness
+            }}
+          />
+        </ErrorBoundary>
         <GridAddControl
           apiRef={apiRef}
           canvasRef={canvasRef}
