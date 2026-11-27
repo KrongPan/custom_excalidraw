@@ -806,100 +806,192 @@ async function openEditor(boardId = BOARD) {
           const r = el.getBoundingClientRect();
           return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2 };
         };
-        const pair = (addSel, delSel) => {
-          const a = box(addSel);
-          const d = box(delSel);
+        const pair = (axis, side) => {
+          const q = '[data-axis="' + axis + '"][data-side="' + side + '"]';
+          const a = box(q + '[data-delta="1"]');
+          const d = box(q + '[data-delta="-1"]');
           if (!a || !d) return null;
-          const left = Math.min(a.left, d.left);
-          const right = Math.max(a.right, d.right);
-          const top = Math.min(a.top, d.top);
-          const bottom = Math.max(a.bottom, d.bottom);
-          return { left, right, top, bottom, cx: (left + right) / 2, cy: (top + bottom) / 2, add: a, del: d };
+          const pl = Math.min(a.left, d.left);
+          const pr = Math.max(a.right, d.right);
+          const pt = Math.min(a.top, d.top);
+          const pb = Math.max(a.bottom, d.bottom);
+          return { left: pl, right: pr, top: pt, bottom: pb, cx: (pl + pr) / 2, cy: (pt + pb) / 2, add: a, del: d };
         };
         return {
           table: { left: tl.x, top: tl.y, right: br.x, bottom: br.y, cx: (tl.x + br.x) / 2, cy: (tl.y + br.y) / 2 },
-          row: pair(".grid-add-row", ".grid-add-row-del"),
-          col: pair(".grid-add-col", ".grid-add-col-del"),
+          top: pair("row", "top"),
+          bottom: pair("row", "bottom"),
+          left: pair("col", "left"),
+          right: pair("col", "right"),
           labels: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label")),
           disabled: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.disabled),
         };
       })()`);
     await hoverFrame(tableGrid);
     const handles = await handleBox(tableGrid);
+    const expectedLabels = [
+      "เพิ่มแถวด้านบน",
+      "ลบแถวบนสุด",
+      "เพิ่มแถวด้านล่าง",
+      "ลบแถวล่างสุด",
+      "เพิ่มคอลัมน์ด้านซ้าย",
+      "ลบคอลัมน์ซ้ายสุด",
+      "เพิ่มคอลัมน์ด้านขวา",
+      "ลบคอลัมน์ขวาสุด",
+    ];
+    check("a table offers add and remove on all four sides", handles.labels.join("|") === expectedLabels.join("|"), JSON.stringify(handles.labels));
     check(
-      "a table offers add and remove on both axes",
-      handles.labels.join("|") === "เพิ่มแถว|ลบแถว|เพิ่มคอลัมน์|ลบคอลัมน์",
-      JSON.stringify(handles.labels),
+      "the top row pair sits above the top edge, centred",
+      Boolean(handles.top) && Math.abs(handles.top.cx - handles.table.cx) <= 2 && handles.top.bottom <= handles.table.top + 1,
+      `top ${JSON.stringify(handles.top)} table ${JSON.stringify(handles.table)}`,
     );
     check(
-      "the row pair is centred under the bottom edge",
-      Boolean(handles.row) &&
-        Math.abs(handles.row.cx - handles.table.cx) <= 2 &&
-        handles.row.top >= handles.table.bottom - 1,
-      `row ${JSON.stringify(handles.row)} table ${JSON.stringify(handles.table)}`,
+      "the bottom row pair sits below the bottom edge, centred",
+      Boolean(handles.bottom) && Math.abs(handles.bottom.cx - handles.table.cx) <= 2 && handles.bottom.top >= handles.table.bottom - 1,
+      `bottom ${JSON.stringify(handles.bottom)} table ${JSON.stringify(handles.table)}`,
     );
     check(
-      "the column pair is centred beside the right edge",
-      Boolean(handles.col) &&
-        Math.abs(handles.col.cy - handles.table.cy) <= 2 &&
-        handles.col.left >= handles.table.right - 1,
-      `col ${JSON.stringify(handles.col)} table ${JSON.stringify(handles.table)}`,
+      "the left column pair sits outside the left edge, centred",
+      Boolean(handles.left) && Math.abs(handles.left.cy - handles.table.cy) <= 2 && handles.left.right <= handles.table.left + 1,
+      `left ${JSON.stringify(handles.left)} table ${JSON.stringify(handles.table)}`,
     );
-    await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
-    await cdp.waitFor(`(() => {
-      const api = window.__boardsApi;
-      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
-      return new Set(cells.map((el) => el.customData.r)).size === ${tableBefore.rows + 1};
-    })()`, { label: "table grew a row" });
-    const rowGrown = await gridShape(tableGrid);
     check(
-      "+ แถว grows the same table and adds no second one",
-      rowGrown.rows === tableBefore.rows + 1 &&
-        rowGrown.cols === tableBefore.cols &&
-        rowGrown.frames === tableBefore.frames &&
-        rowGrown.arrows === 0,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(rowGrown)}`,
-    );
-    await hoverFrame(tableGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-col").click()`);
-    await cdp.waitFor(`(() => {
-      const api = window.__boardsApi;
-      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
-      return new Set(cells.map((el) => el.customData.c)).size === ${tableBefore.cols + 1};
-    })()`, { label: "table grew a column" });
-    const colGrown = await gridShape(tableGrid);
-    check(
-      "+ คอลัมน์ adds a column to the same table",
-      colGrown.cols === tableBefore.cols + 1 && colGrown.frames === tableBefore.frames,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(colGrown)}`,
+      "the right column pair sits outside the right edge, centred",
+      Boolean(handles.right) && Math.abs(handles.right.cy - handles.table.cy) <= 2 && handles.right.left >= handles.table.right - 1,
+      `right ${JSON.stringify(handles.right)} table ${JSON.stringify(handles.table)}`,
     );
 
-    /* the minus half of each pair drops the last row/column of that same table */
+    const clickHandle = async (axis, side, delta) => {
+      await hoverFrame(tableGrid);
+      await cdp.evaluate(`document.querySelector('[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]').click()`);
+    };
+    const waitRows = (n) =>
+      cdp.waitFor(
+        `(() => {
+          const cells = window.__boardsApi.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
+          return new Set(cells.map((el) => el.customData.r)).size === ${n};
+        })()`,
+        { label: `table with ${n} rows` },
+      );
+    const waitCols = (n) =>
+      cdp.waitFor(
+        `(() => {
+          const cells = window.__boardsApi.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.c != null && !el.isDeleted);
+          return new Set(cells.map((el) => el.customData.c)).size === ${n};
+        })()`,
+        { label: `table with ${n} columns` },
+      );
+    const cellPoint = (r, c) =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const cell = api.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r === ${r} && el.customData?.c === ${c} && !el.isDeleted);
+        if (!cell) return null;
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        return {
+          x: host.left + (cell.x + cell.width / 2 + (s.scrollX || 0)) * zoom,
+          y: host.top + (cell.y + cell.height / 2 + (s.scrollY || 0)) * zoom,
+        };
+      })()`);
+    const doubleClick = async (x, y) => {
+      for (const count of [1, 2]) {
+        await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: count });
+        await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: count });
+        await sleep(30);
+      }
+    };
+    const textCell = () =>
+      cdp.evaluate(`(() => {
+        const els = window.__boardsApi.getSceneElements();
+        const t = els.find((el) => el.type === "text" && el.text === "alpha" && el.containerId && !el.isDeleted);
+        if (!t) return null;
+        const cell = els.find((el) => el.id === t.containerId);
+        return cell ? { r: cell.customData?.r, c: cell.customData?.c } : null;
+      })()`);
+
+    /* the first cell gets a word, so an insert on the top or left edge has to
+       carry it to the next r/c instead of leaving it on the wrong cell */
+    await cdp.evaluate(`(() => { try { window.__boardsApi.setActiveTool({ type: "selection" }); } catch { /* older api */ } })()`);
     await hoverFrame(tableGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-row-del").click()`);
+    const firstCell = await cellPoint(0, 0);
+    await doubleClick(firstCell.x, firstCell.y);
+    await cdp.waitFor(`Boolean(document.activeElement && document.activeElement.tagName === "TEXTAREA")`, { label: "cell text editor" });
+    await cdp.type("alpha");
+    await cdp.key("Escape", "Escape", 27);
     await cdp.waitFor(`(() => {
-      const api = window.__boardsApi;
-      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
-      return new Set(cells.map((el) => el.customData.r)).size === ${tableBefore.rows};
-    })()`, { label: "table lost a row" });
-    const rowBack = await gridShape(tableGrid);
+      const els = window.__boardsApi.getSceneElements();
+      return els.some((el) => el.type === "text" && el.text === "alpha" && el.containerId && !el.isDeleted);
+    })()`, { label: "cell text committed" });
+    const typed = await textCell();
+    check("the first cell keeps the typed word", typed?.r === 0 && typed?.c === 0, JSON.stringify(typed));
+
+    const rows0 = tableBefore.rows;
+    const cols0 = tableBefore.cols;
+
+    await clickHandle("row", "top", 1);
+    await waitRows(rows0 + 1);
+    const topGrown = await gridShape(tableGrid);
+    const afterTopAdd = await textCell();
     check(
-      "- แถว drops the last row of the same table",
-      rowBack.rows === tableBefore.rows && rowBack.cols === colGrown.cols && rowBack.frames === tableBefore.frames,
-      `${JSON.stringify(colGrown)} -> ${JSON.stringify(rowBack)}`,
+      "+ แถว on the top edge inserts above and pushes the word down",
+      topGrown.rows === rows0 + 1 && topGrown.cols === cols0 && afterTopAdd?.r === 1 && afterTopAdd?.c === 0,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(topGrown)} text ${JSON.stringify(afterTopAdd)}`,
     );
-    await hoverFrame(tableGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-col-del").click()`);
-    await cdp.waitFor(`(() => {
-      const api = window.__boardsApi;
-      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.c != null && !el.isDeleted);
-      return new Set(cells.map((el) => el.customData.c)).size === ${tableBefore.cols};
-    })()`, { label: "table lost a column" });
-    const colBack = await gridShape(tableGrid);
+    await clickHandle("row", "top", -1);
+    await waitRows(rows0);
+    const afterTopDrop = await textCell();
     check(
-      "- คอลัมน์ drops the last column of the same table",
-      colBack.cols === tableBefore.cols && colBack.rows === tableBefore.rows && colBack.frames === tableBefore.frames,
-      `${JSON.stringify(rowBack)} -> ${JSON.stringify(colBack)}`,
+      "- แถว on the top edge drops the first row and pulls the word back",
+      afterTopDrop?.r === 0 && afterTopDrop?.c === 0,
+      JSON.stringify(afterTopDrop),
+    );
+
+    await clickHandle("row", "bottom", 1);
+    await waitRows(rows0 + 1);
+    const bottomGrown = await gridShape(tableGrid);
+    check(
+      "+ แถว on the bottom edge appends a row to the same table",
+      bottomGrown.rows === rows0 + 1 && bottomGrown.frames === tableBefore.frames && bottomGrown.arrows === 0,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(bottomGrown)}`,
+    );
+    await clickHandle("row", "bottom", -1);
+    await waitRows(rows0);
+    check("- แถว on the bottom edge drops the last row", (await gridShape(tableGrid)).rows === rows0, `${rows0} rows`);
+
+    await clickHandle("col", "left", 1);
+    await waitCols(cols0 + 1);
+    const leftGrown = await gridShape(tableGrid);
+    const afterLeftAdd = await textCell();
+    check(
+      "+ คอลัมน์ on the left edge inserts before the word and pushes it right",
+      leftGrown.cols === cols0 + 1 && leftGrown.frames === tableBefore.frames && afterLeftAdd?.c === 1 && afterLeftAdd?.r === 0,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(leftGrown)} text ${JSON.stringify(afterLeftAdd)}`,
+    );
+    await clickHandle("col", "left", -1);
+    await waitCols(cols0);
+    const afterLeftDrop = await textCell();
+    check(
+      "- คอลัมน์ on the left edge drops the first column and pulls the word back",
+      afterLeftDrop?.c === 0 && afterLeftDrop?.r === 0,
+      JSON.stringify(afterLeftDrop),
+    );
+
+    await clickHandle("col", "right", 1);
+    await waitCols(cols0 + 1);
+    const rightGrown = await gridShape(tableGrid);
+    check(
+      "+ คอลัมน์ on the right edge appends a column to the same table",
+      rightGrown.cols === cols0 + 1 && rightGrown.frames === tableBefore.frames,
+      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(rightGrown)}`,
+    );
+    await clickHandle("col", "right", -1);
+    await waitCols(cols0);
+    const back = await gridShape(tableGrid);
+    check(
+      "- คอลัมน์ on the right edge drops the last column",
+      back.cols === cols0 && back.rows === rows0 && back.frames === tableBefore.frames,
+      `${JSON.stringify(rightGrown)} -> ${JSON.stringify(back)}`,
     );
 
     /* ------------------------------------------- drag a cell border to size */
@@ -1750,17 +1842,17 @@ async function openEditor(boardId = BOARD) {
     const classHandles = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label"))`);
     check(
       "a class grows only its field rows — it has no column handle",
-      classHandles.join("|") === "เพิ่มแถว|ลบแถว",
+      classHandles.join("|") === ["เพิ่มแถวด้านบน", "ลบแถวบนสุด", "เพิ่มแถวด้านล่าง", "ลบแถวล่างสุด"].join("|"),
       JSON.stringify(classHandles),
     );
-    await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
+    await cdp.evaluate(`document.querySelector('[data-axis="row"][data-side="bottom"][data-delta="1"]').click()`);
     await cdp.waitFor(`(() => {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore + 1};
     })()`.replace("__GRID__", firstClassGrid), { label: "class grew a field row" });
     check("+ แถว adds a field to the class", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
     await hoverFrame(firstClassGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-row-del").click()`);
+    await cdp.evaluate(`document.querySelector('[data-axis="row"][data-side="bottom"][data-delta="-1"]').click()`);
     await cdp.waitFor(`(() => {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore};

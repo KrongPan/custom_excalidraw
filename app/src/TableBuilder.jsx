@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 const COLORS = ["gray", "blue", "green", "yellow", "orange", "red", "violet", "cyan"];
 
@@ -33,24 +33,7 @@ function NumberField({ label, value, limits, fallback, step = 1, onChange }) {
   );
 }
 
-const SIZE_LIMITS = {
-  row: [24, 1200],
-  col: [40, 1600],
-};
-
-export default function TableBuilder({
-  open,
-  onClose,
-  onInsert,
-  selected,
-  onUpdate,
-  onGrow,
-  active,
-  onResizeRow,
-  onResizeCol,
-  onPreviewRow,
-  onPreviewCol,
-}) {
+export default function TableBuilder({ open, onClose, onInsert, selected, onUpdate }) {
   const [title, setTitle] = useState("");
   const [columns, setColumns] = useState(3);
   const [rows, setRows] = useState(4);
@@ -74,22 +57,6 @@ export default function TableBuilder({
   const cellW = Math.max(1, Math.round(width / Math.max(1, columns)));
   const cellH = Math.max(1, Math.round(height / Math.max(1, rows)));
 
-  // the cell the user last clicked decides which row / column the size fields aim at
-  const rowIndex = active && active.grid === selected?.grid ? active.r : null;
-  const colIndex = active && active.grid === selected?.grid ? active.c : null;
-  const rowSize = rowIndex != null ? selected?.rowHeights?.[rowIndex] ?? cellH : null;
-  const colSize = colIndex != null ? selected?.colWidths?.[colIndex] ?? cellW : null;
-  const [rowDraft, setRowDraft] = useState(rowSize ?? cellH);
-  const [colDraft, setColDraft] = useState(colSize ?? cellW);
-
-  useEffect(() => {
-    if (rowSize != null) setRowDraft(rowSize);
-  }, [rowSize, rowIndex]);
-
-  useEffect(() => {
-    if (colSize != null) setColDraft(colSize);
-  }, [colSize, colIndex]);
-
   const run = (fn, label) => {
     try {
       const count = fn();
@@ -97,75 +64,6 @@ export default function TableBuilder({
     } catch (error) {
       setNote({ ok: false, text: error?.message || String(error) });
     }
-  };
-
-  const act = (fn, text) => {
-    try {
-      fn();
-      setNote({ ok: true, text });
-    } catch (error) {
-      setNote({ ok: false, text: error?.message || String(error) });
-    }
-  };
-
-  const applyRow = (value) => {
-    if (rowIndex == null) return;
-    const next = clamp(value, SIZE_LIMITS.row, rowSize ?? cellH);
-    setRowDraft(next);
-    act(() => onResizeRow?.(rowIndex, next), `แถว ${rowIndex + 1} สูง ${next} px`);
-  };
-
-  const applyCol = (value) => {
-    if (colIndex == null) return;
-    const next = clamp(value, SIZE_LIMITS.col, colSize ?? cellW);
-    setColDraft(next);
-    act(() => onResizeCol?.(colIndex, next), `คอลัมน์ ${colIndex + 1} กว้าง ${next} px`);
-  };
-
-  /* Sliders preview while the thumb moves and only commit when it is released, so
-     one drag is one undo step and one save. The number field stays for exact px. */
-  const previewRow = (value) => {
-    if (rowIndex == null) return;
-    const next = clamp(value, SIZE_LIMITS.row, rowSize ?? cellH);
-    setRowDraft(next);
-    onPreviewRow?.(rowIndex, next);
-  };
-
-  const previewCol = (value) => {
-    if (colIndex == null) return;
-    const next = clamp(value, SIZE_LIMITS.col, colSize ?? cellW);
-    setColDraft(next);
-    onPreviewCol?.(colIndex, next);
-  };
-
-  /* A slider commits when a drag (or a keyboard nudge) ends, never on blur: the
-     draft still holds the value the thumb was left at, so a blur caused by an
-     unrelated click — pressing Cmd+Z on the board, switching rows — used to
-     re-apply that stale size and overwrite the restored one. */
-  const rowDragRef = useRef(false);
-  const colDragRef = useRef(false);
-
-  const endRowDrag = () => {
-    if (!rowDragRef.current) return;
-    rowDragRef.current = false;
-    if (rowIndex != null) applyRow(rowDraft);
-  };
-
-  const endColDrag = () => {
-    if (!colDragRef.current) return;
-    colDragRef.current = false;
-    if (colIndex != null) applyCol(colDraft);
-  };
-
-  /** Focus left the slider without a drag: drop the draft, keep the real size. */
-  const dropRowDrag = () => {
-    rowDragRef.current = false;
-    setRowDraft(rowSize ?? cellH);
-  };
-
-  const dropColDrag = () => {
-    colDragRef.current = false;
-    setColDraft(colSize ?? cellW);
   };
 
   const insert = () => {
@@ -212,156 +110,28 @@ export default function TableBuilder({
           <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="inventory.lot" />
         </label>
 
-        <div className="row">
-          <NumberField label="จำนวนคอลัมน์" value={columns} limits={LIMITS.columns} fallback={3} onChange={setColumns} />
-          <NumberField label="จำนวนแถว" value={rows} limits={LIMITS.rows} fallback={4} onChange={setRows} />
-        </div>
-
-        <div className="row">
-          <NumberField label="ความกว้างรวม (px)" value={width} limits={LIMITS.width} fallback={520} step={10} onChange={setWidth} />
-          <NumberField label="ความสูงรวม (px)" value={height} limits={LIMITS.height} fallback={240} step={10} onChange={setHeight} />
-        </div>
-
-        {selected && (
-          <div className="grid-sizing">
-            <p className="hint">
-              {rowIndex != null
-                ? `กำลังปรับแถว ${rowIndex + 1} · คอลัมน์ ${colIndex + 1}`
-                : "คลิกช่องในตารางเพื่อเลือกแถวและคอลัมน์ที่ต้องการปรับ"}
-            </p>
+        {/* A table that is already on the canvas grows, shrinks and resizes on the
+            canvas itself: + / - on all four edges for whole rows and columns, and
+            a border drag for one track's size. Keeping a second set of the same
+            controls here only let the two disagree, so the panel keeps the jobs
+            the canvas cannot do — heading, colour and header row. */}
+        {selected ? (
+          <p className="hint">
+            เลือกอยู่: ตาราง {selected.cols} × {selected.rows} — ลากขอบช่องเพื่อยืดแถว/คอลัมน์ หรือกด + / − ที่ขอบบน-ล่าง
+            (แถว) และซ้าย-ขวา (คอลัมน์) บนตัวตาราง
+          </p>
+        ) : (
+          <>
             <div className="row">
-              <label className="grow">
-                ความสูงแถว {rowIndex != null ? rowIndex + 1 : "—"} (px)
-                <input
-                  type="number"
-                  aria-label="ความสูงของแถวที่เลือก"
-                  min={SIZE_LIMITS.row[0]}
-                  max={SIZE_LIMITS.row[1]}
-                  step={5}
-                  value={rowDraft}
-                  disabled={rowIndex == null}
-                  onChange={(e) => setRowDraft(e.target.value)}
-                  onBlur={() => applyRow(rowDraft)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") applyRow(rowDraft);
-                  }}
-                />
-              </label>
-              <button
-                type="button"
-                className="btn small"
-                disabled={rowIndex == null}
-                aria-label="ลดความสูงแถว"
-                onClick={() => applyRow((Number(rowDraft) || rowSize || cellH) - 10)}
-              >
-                −
-              </button>
-              <button
-                type="button"
-                className="btn small"
-                disabled={rowIndex == null}
-                aria-label="เพิ่มความสูงแถว"
-                onClick={() => applyRow((Number(rowDraft) || rowSize || cellH) + 10)}
-              >
-                +
-              </button>
+              <NumberField label="จำนวนคอลัมน์" value={columns} limits={LIMITS.columns} fallback={3} onChange={setColumns} />
+              <NumberField label="จำนวนแถว" value={rows} limits={LIMITS.rows} fallback={4} onChange={setRows} />
             </div>
-            <input
-              type="range"
-              className="size-slider"
-              aria-label="สไลเดอร์ความสูงของแถวที่เลือก"
-              min={SIZE_LIMITS.row[0]}
-              max={SIZE_LIMITS.row[1]}
-              step={5}
-              value={clamp(rowDraft, SIZE_LIMITS.row, rowSize ?? cellH)}
-              disabled={rowIndex == null}
-              onChange={(e) => previewRow(e.target.value)}
-              onPointerDown={() => {
-                rowDragRef.current = true;
-              }}
-              onKeyDown={() => {
-                rowDragRef.current = true;
-              }}
-              onPointerUp={endRowDrag}
-              onTouchEnd={endRowDrag}
-              onKeyUp={endRowDrag}
-              onBlur={dropRowDrag}
-            />
-            <div className="row">
-              <label className="grow">
-                ความกว้างคอลัมน์ {colIndex != null ? colIndex + 1 : "—"} (px)
-                <input
-                  type="number"
-                  aria-label="ความกว้างของคอลัมน์ที่เลือก"
-                  min={SIZE_LIMITS.col[0]}
-                  max={SIZE_LIMITS.col[1]}
-                  step={5}
-                  value={colDraft}
-                  disabled={colIndex == null}
-                  onChange={(e) => setColDraft(e.target.value)}
-                  onBlur={() => applyCol(colDraft)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") applyCol(colDraft);
-                  }}
-                />
-              </label>
-              <button
-                type="button"
-                className="btn small"
-                disabled={colIndex == null}
-                aria-label="ลดความกว้างคอลัมน์"
-                onClick={() => applyCol((Number(colDraft) || colSize || cellW) - 10)}
-              >
-                −
-              </button>
-              <button
-                type="button"
-                className="btn small"
-                disabled={colIndex == null}
-                aria-label="เพิ่มความกว้างคอลัมน์"
-                onClick={() => applyCol((Number(colDraft) || colSize || cellW) + 10)}
-              >
-                +
-              </button>
-            </div>
-            <input
-              type="range"
-              className="size-slider"
-              aria-label="สไลเดอร์ความกว้างของคอลัมน์ที่เลือก"
-              min={SIZE_LIMITS.col[0]}
-              max={SIZE_LIMITS.col[1]}
-              step={5}
-              value={clamp(colDraft, SIZE_LIMITS.col, colSize ?? cellW)}
-              disabled={colIndex == null}
-              onChange={(e) => previewCol(e.target.value)}
-              onPointerDown={() => {
-                colDragRef.current = true;
-              }}
-              onKeyDown={() => {
-                colDragRef.current = true;
-              }}
-              onPointerUp={endColDrag}
-              onTouchEnd={endColDrag}
-              onKeyUp={endColDrag}
-              onBlur={dropColDrag}
-            />
-          </div>
-        )}
 
-        {selected && (
-          <div className="selected-grid">
-            <p className="hint">
-              เลือกอยู่: ตาราง {selected.cols} × {selected.rows} — เปลี่ยนตัวเลขแล้วกด “อัปเดตตารางที่เลือก” (ข้อความในช่องเดิมยังอยู่)
-            </p>
             <div className="row">
-              <button type="button" className="btn small" onClick={() => run(() => onGrow("row"), "เพิ่มแถวแล้ว")}>
-                + 1 แถว
-              </button>
-              <button type="button" className="btn small" onClick={() => run(() => onGrow("col"), "เพิ่มคอลัมน์แล้ว")}>
-                + 1 คอลัมน์
-              </button>
+              <NumberField label="ความกว้างรวม (px)" value={width} limits={LIMITS.width} fallback={520} step={10} onChange={setWidth} />
+              <NumberField label="ความสูงรวม (px)" value={height} limits={LIMITS.height} fallback={240} step={10} onChange={setHeight} />
             </div>
-          </div>
+          </>
         )}
 
         <div className="row">
@@ -381,9 +151,11 @@ export default function TableBuilder({
           </label>
         </div>
 
-        <p className="hint">
-          {columns} × {rows} ช่อง · {width}×{height} px · ช่องละ ~{cellW}×{cellH} px — จะวางต่อท้ายด้านขวาของกระดาน
-        </p>
+        {selected ? null : (
+          <p className="hint">
+            {columns} × {rows} ช่อง · {width}×{height} px · ช่องละ ~{cellW}×{cellH} px — จะวางต่อท้ายด้านขวาของกระดาน
+          </p>
+        )}
 
         {selected && (
           <button
@@ -407,7 +179,7 @@ export default function TableBuilder({
               )
             }
           >
-            อัปเดตตารางที่เลือก
+            อัปเดตหัวตาราง สี และแถวหัว
           </button>
         )}
 

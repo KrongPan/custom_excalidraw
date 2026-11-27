@@ -109,7 +109,12 @@ const GAP = 40;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const round = (n) => Math.round(n * 100) / 100;
-const clampTo = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+/** Which edge pill a grow/shrink on one axis and side presses. */
+const handleSide = (axis, side) => {
+  if (axis === "row") return side === "start" ? "top" : "bottom";
+  return side === "start" ? "left" : "right";
+};
+
 const near = (a, b, eps = EPS) => Math.abs(a - b) <= eps;
 /* Line breaks depend on the cell width and a squeezed value may end in "…", so
    text comparisons look at the characters only. */
@@ -872,7 +877,7 @@ class Page {
     await this.installIoRecorder();
     await this.cdp.send("Page.navigate", { url: this.url });
     await this.cdp.waitFor(
-      `document.readyState === "complete" && !!window.__boardsApi && !!document.querySelector(".tools-table") && !document.querySelector(".bar")`,
+      `document.readyState === "complete" && !!window.__boardsApi && !!document.querySelector(".tools-more")`,
       { timeout: 25000, label: "editor ready" },
     );
     await this.settle();
@@ -882,7 +887,7 @@ class Page {
   async reload() {
     await this.cdp.send("Page.reload", { ignoreCache: false });
     await this.cdp.waitFor(
-      `document.readyState === "complete" && !!window.__boardsApi && !!document.querySelector(".tools-table") && !document.querySelector(".bar")`,
+      `document.readyState === "complete" && !!window.__boardsApi && !!document.querySelector(".tools-more")`,
       { timeout: 25000, label: "editor reload" },
     );
     await sleep(200);
@@ -892,7 +897,16 @@ class Page {
 
   async openPanel() {
     const open = await this.cdp.evaluate(`!!document.querySelector(".panel.open")`);
-    if (!open) await this.clickSelector(".tools-table");
+    if (!open) {
+      // the table tool sits in the overflow menu since the toolbar was trimmed
+      await this.cdp.waitFor(`!!document.querySelector(".tools-more")`, { timeout: 8000, label: "the tools menu button" });
+      await this.clickSelector(".tools-more");
+      await this.cdp.waitFor(`!!document.querySelector(".tools-more-menu[role=menu]")`, { timeout: 5000, label: "tools menu" });
+      await this.clickMarked(
+        `[...document.querySelectorAll(".tools-more-row")].find((row) => row.querySelector(".tools-more-label")?.textContent?.trim() === "สร้างตาราง")`,
+        'the "สร้างตาราง" tool row',
+      );
+    }
     await this.cdp.waitFor(`!!document.querySelector(".panel.open")`, { timeout: 5000, label: "panel open" });
     await this.stableBox(".panel"); // the panel slides in; wait for it to stop
   }
@@ -1039,30 +1053,11 @@ class Page {
   }
 
   async clickCell(gridId, r, c) {
+    this.lastCell = { grid: gridId, r, c };
     await this.reveal(gridId, r, c);
     const point = await this.cellPoint(gridId, r, c);
     await this.cdp.clickPoint(point.x, point.y);
     await sleep(60);
-  }
-
-  async setField(label, value) {
-    const ok = await this.cdp.evaluate(`(() => {
-      const el = document.querySelector(${JSON.stringify(`input[aria-label="${label}"]`)});
-      if (!el) return null;
-      el.focus();
-      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
-      descriptor.set.call(el, ${JSON.stringify(String(value))});
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      return el.value;
-    })()`);
-    if (ok == null) throw new Fail("ui-missing", `no field "${label}"`);
-    return ok;
-  }
-
-  async fieldValue(label) {
-    return this.cdp.evaluate(
-      `document.querySelector(${JSON.stringify(`input[aria-label="${label}"]`)})?.value ?? null`,
-    );
   }
 
   async selectColor(name) {
@@ -1102,60 +1097,120 @@ class Page {
   }
 
   async update() {
-    await this.button("อัปเดตตารางที่เลือก");
+    // the panel's update button is now about the heading/colour, not the size
+    await this.clickMarked(
+      `[...document.querySelectorAll(".panel button")].find((node) => node.textContent.trim().startsWith("อัปเดต"))`,
+      "panel button อัปเดต…",
+    );
   }
 
   async insert() {
     await this.button("แทรกตารางใหม่");
   }
 
-  async grow(axis) {
-    await this.button(axis === "row" ? "+ 1 แถว" : "+ 1 คอลัมน์");
+  /** Hover the table a person has selected and read one edge pill's screen box. */
+  async gridHandle(axis, side, delta) {
+    const grid = this.lastCell?.grid || gridIds((await this.liveScene()).elements)[0];
+    if (!grid) throw new Fail("ui-missing", "no table to grow");
+    const cell = liveCells((await this.liveScene()).elements, grid)[0];
+    if (!cell) throw new Fail("ui-missing", `table ${grid} has no cells`);
+    await this.reveal(grid, cell.customData.r, cell.customData.c);
+    const point = await this.cellPoint(grid, cell.customData.r, cell.customData.c);
+    await this.cdp.mouse("mouseMoved", point.x, point.y);
+    await this.cdp.waitFor(`document.querySelector(".grid-add")?.classList.contains("visible")`, {
+      timeout: 4000,
+      label: "the on-table handles",
+    });
+    const box = await this.cdp.evaluate(`(() => {
+      const el = document.querySelector('[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]');
+      if (!el) return null;
+      if (el.disabled) return { disabled: true };
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      // the panel floats over the canvas, so a pill near the right edge can sit
+      // underneath it; the caller then has to click the element itself
+      const covered = !el.contains(document.elementFromPoint(x, y));
+      return { x, y, covered };
+    })()`);
+    if (!box) throw new Fail("ui-missing", `no ${axis}/${side}/${delta} handle on ${grid}`);
+    if (box.disabled) throw new Fail("ui-missing", `the ${axis}/${side}/${delta} handle is disabled on ${grid}`);
+    return { grid, box, selector: `[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]` };
   }
 
-  /** Drag one of the two size sliders by `delta` px and let go (commits). */
-  async dragSlider(kind, delta) {
-    const label =
-      kind === "row" ? "สไลเดอร์ความสูงของแถวที่เลือก" : "สไลเดอร์ความกว้างของคอลัมน์ที่เลือก";
-    const box = await this.cdp.evaluate(`(() => {
-      const el = document.querySelector(${JSON.stringify(`input[aria-label="${label}"]`)});
-      if (!el) return null;
-      el.scrollIntoView({ block: "center" });
-      const r = el.getBoundingClientRect();
-      if (!r.width || !r.height || el.disabled) return null;
-      const min = Number(el.min), max = Number(el.max), value = Number(el.value);
-      const usable = r.width - 16;
-      return {
-        x: r.left + 8 + ((value - min) / (max - min)) * usable,
-        y: r.top + r.height / 2,
-        width: r.width,
-        value,
-      };
-    })()`);
-    if (!box) throw new Fail("ui-missing", `slider "${kind}" is not usable`);
-    const toX = Math.max(8, Math.min(box.width - 8, box.x + delta));
-    await this.cdp.mouse("mouseMoved", box.x, box.y);
-    await this.cdp.mouse("mousePressed", box.x, box.y);
-    for (let i = 1; i <= 5; i += 1) {
-      await this.cdp.send("Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: box.x + ((toX - box.x) * i) / 5,
-        y: box.y,
-        button: "left",
-        buttons: 1,
-      });
-      await sleep(30);
+  async liveScene() {
+    return this.settle();
+  }
+
+  /** Press one pill: a real mouse click when it is reachable, else the element itself. */
+  async pressHandle({ grid, box, selector }) {
+    if (box.covered) {
+      const clicked = await this.cdp.evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        el.click();
+        return true;
+      })()`);
+      if (!clicked) throw new Fail("ui-missing", `${selector} vanished before it could be pressed`);
+    } else {
+      await this.cdp.clickPoint(box.x, box.y);
     }
-    await this.cdp.send("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: toX,
-      y: box.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
+    await sleep(150);
+    return grid;
+  }
+
+  async grow(axis, side = "end") {
+    return this.pressHandle(await this.gridHandle(axis, handleSide(axis, side), "1"));
+  }
+
+  async shrink(axis, side = "end") {
+    return this.pressHandle(await this.gridHandle(axis, handleSide(axis, side), "-1"));
+  }
+
+  /**
+   * Drag the border of the row/column that holds the cell last clicked, by
+   * `delta` screen px, then let go — the panel no longer carries track sliders.
+   */
+  async dragSlider(kind, delta, gridId) {
+    const last = this.lastCell;
+    const grid = gridId || last?.grid;
+    if (!grid) throw new Fail("ui-missing", "no table was selected before the track drag");
+    const mine = last && last.grid === grid ? last : null;
+    const index = kind === "row" ? mine?.r ?? 0 : mine?.c ?? 0;
+    await this.reveal(grid, kind === "row" ? index : 0, kind === "row" ? 0 : index);
+    const target = await this.cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const state = api.getAppState();
+      const zoom = state.zoom?.value || 1;
+      const host = document.querySelector(".canvas");
+      if (!host) return null;
+      const rect = host.getBoundingClientRect();
+      const cells = api.getSceneElements().filter((el) => !el.isDeleted && el.customData?.grid === ${JSON.stringify(grid)} && typeof el.customData.r === "number" && typeof el.customData.c === "number");
+      if (!cells.length) return { missing: "no live cells", total: api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(grid)}).length };
+      const axis = ${JSON.stringify(kind)};
+      const lastIndex = axis === "row"
+        ? Math.max(...cells.map((el) => el.customData.r))
+        : Math.max(...cells.map((el) => el.customData.c));
+      // the border between this track and the next one; the table's outer edge is not a track
+      const track = Math.min(${index}, Math.max(0, lastIndex - 1));
+      const cell = cells.find(
+        (el) => el.customData.r === (axis === "row" ? track : 0) && el.customData.c === (axis === "row" ? 0 : track),
+      );
+      if (!cell) return { missing: "no cell at the track", index: ${index}, lastIndex, track, cells: cells.length };
+      const sceneX = axis === "row" ? cell.x + Math.min(20, cell.width / 2) : cell.x + cell.width;
+      const sceneY = axis === "row" ? cell.y + cell.height : cell.y + Math.min(20, cell.height / 2);
+      return { x: rect.left + (sceneX + (state.scrollX || 0)) * zoom, y: rect.top + (sceneY + (state.scrollY || 0)) * zoom, track };
+    })()`);
+    if (!target) throw new Fail("ui-missing", `no ${kind} border to drag on ${grid}`);
+    if (target.missing) throw new Fail("ui-missing", `no ${kind} border to drag on ${grid}: ${target.missing} ${JSON.stringify(target)}`);
+    await this.cdp.mouse("mouseMoved", target.x, target.y);
+    await sleep(80);
+    const dx = kind === "row" ? 0 : delta;
+    const dy = kind === "row" ? delta : 0;
+    await this.cdp.dragPoint(target.x, target.y, target.x + dx, target.y + dy, 6);
     await sleep(120);
-    return { from: box.value, delta: Math.round(toX - box.x) };
+    return { from: target.track, delta };
   }
 
   async dragCell(gridId, r, c, dx, dy) {
@@ -1250,7 +1305,7 @@ const OPS = [
   ["cell-text", 4],
   ["count-up", 3],
   ["count-down", 3],
-  ["size-total", 3],
+  ["size-drag", 3],
   ["row-slider", 4],
   ["col-slider", 4],
   ["undo", 3],
@@ -1420,7 +1475,19 @@ class Soak {
       }
       const current = await page.selectedGrid();
       const target = pick(rng, grids.filter((id) => id !== current));
-      const { cell, point } = await this.clickableCell(target);
+      let picked;
+      try {
+        picked = await this.clickableCell(target);
+      } catch (error) {
+        // growth in place can end with one table lying over another; then no
+        // point of the target can be clicked and this op simply has no move
+        if (error instanceof Fail && error.code === "ui-covered") {
+          await this.opLog(`select-other skipped: ${error.message}`);
+          return "target is covered";
+        }
+        throw error;
+      }
+      const { cell, point } = picked;
       await page.clickCell(target, cell.customData.r, cell.customData.c);
       const scene = await page.settle();
       const now = await page.selectedGrid();
@@ -1525,7 +1592,7 @@ class Soak {
 
       const kind = name === "row-slider" ? "row" : "col";
       const before = geometryOf(await this.live(), grid);
-      const drag = await page.dragSlider(kind, rngInt(rng, -140, 140));
+      const drag = await page.dragSlider(kind, rngInt(rng, -140, 140), grid);
       const after = geometryOf(await this.live(), grid);
       const changed = !sameGeometry(before, after);
       await this.opLog(
@@ -1626,8 +1693,12 @@ class Soak {
         next = name === "count-up" ? Math.min(limit, current + 1) : Math.min(limit, current + delta);
       }
       if (next === current) throw new Fail("panel", `${axis} cannot move from ${current}`);
-      const label = axis === "cols" ? "จำนวนคอลัมน์" : "จำนวนแถว";
-      await this.setAndApply(label, next);
+      const track = axis === "cols" ? "col" : "row";
+      const steps = Math.abs(next - current);
+      for (let i = 0; i < steps; i += 1) {
+        if (name === "count-up") await page.grow(track);
+        else await page.shrink(track);
+      }
       const after = await this.live();
       const nextCols = Math.max(...liveCells(after, grid).map((el) => el.customData.c)) + 1;
       const nextRows = Math.max(...liveCells(after, grid).map((el) => el.customData.r)) + 1;
@@ -1646,36 +1717,17 @@ class Soak {
       return `${axis} ${current} → ${next}`;
     }
 
-    if (name === "size-total") {
-      // the panel may ask for a total that cannot hold the minimum track sizes;
-      // the grid then has to be exactly max(asked, cols*40) x max(asked, rows*24)
-      const cols = info.cols;
-      const rows = info.rows;
-      const room = await this.roomAround(grid);
-      const minW = cols * MIN_COL_W;
-      const minH = rows * MIN_ROW_H;
-      if (room.width < Math.max(minW, 80) || room.height < Math.max(minH, 40)) {
-        await this.opLog(`size skipped: not even the minimum ${minW}x${minH} fits next to the other tables`);
-        return "no room to resize";
-      }
-      const width = clampTo(Math.min(rngInt(rng, 1, 18) * 40, Math.floor(room.width)), 80, 4000);
-      const height = clampTo(Math.min(rngInt(rng, 1, 10) * 40, Math.floor(room.height)), 40, 4000);
-      const wantW = Math.max(width, minW);
-      const wantH = Math.max(height, minH);
-      await this.setAndApply("ความกว้างรวม (px)", width);
-      await this.setAndApply("ความสูงรวม (px)", height);
+    if (name === "size-drag") {
+      // the total size is now changed by dragging a border, so the op drags a
+      // track and then checks the table is still a whole, tiling grid
+      const drag = await page.dragSlider(rng() < 0.5 ? "row" : "col", rngInt(rng, 30, 140), grid);
       const after = await this.live();
-      const cells = liveCells(after, grid);
       const box = geometryOf(after, grid).box;
-      if (!near(box[2], wantW, 1) || !near(box[3], wantH, 1)) {
-        throw new Fail(
-          "panel-size",
-          `asked for ${width}×${height} on a ${cols}×${rows} grid (min ${wantW}×${wantH}), the grid is ${round(box[2])}×${round(box[3])}`,
-          cells.map((el) => el.id),
-        );
+      if (!(box[2] > 0 && box[3] > 0)) {
+        throw new Fail("size-drag", `dragging a border left a ${round(box[2])}×${round(box[3])} grid`);
       }
-      await this.opLog(`size ${width}x${height} -> ${round(box[2])}x${round(box[3])}`);
-      return `size ${round(box[2])}×${round(box[3])}`;
+      await this.opLog(`size drag ${drag.delta}px -> ${round(box[2])}x${round(box[3])}`);
+      return `drag ${drag.delta}px → ${round(box[2])}×${round(box[3])}`;
     }
 
     if (name === "header") {
@@ -1746,16 +1798,6 @@ class Soak {
     }
 
     throw new Fail("op-unknown", `unknown op ${name}`);
-  }
-
-  /** Set a panel field, make sure React kept the value, then press update. */
-  async setAndApply(label, value) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await this.page.setField(label, value);
-      if (Number(await this.page.fieldValue(label)) === value) break;
-      await sleep(60);
-    }
-    await this.page.update();
   }
 
   /** Generic per-op bookkeeping: invariants, persistence, text preservation. */
@@ -2119,14 +2161,20 @@ async function runProbe(opts) {
     // scenario: the same table edited a few times, then undone step by step
     await page.insert();
     await sleep(300);
-    await page.setField("จำนวนคอลัมน์", 5);
-    await page.update();
+    await page.clickCell(grid, cell.customData.r, cell.customData.c);
+    await sleep(150);
+    await page.grow("col");
     await sleep(250);
-    await probeStep(page, "cols 3->5");
-    await page.setField("จำนวนคอลัมน์", 3);
-    await page.update();
+    await probeStep(page, "cols +1");
+    await page.grow("col");
     await sleep(250);
-    await probeStep(page, "cols 5->3");
+    await probeStep(page, "cols +2");
+    await page.shrink("col");
+    await sleep(250);
+    await probeStep(page, "cols -1");
+    await page.shrink("col");
+    await sleep(250);
+    await probeStep(page, "cols -2");
     await page.undo();
     await probeStep(page, "undo 1");
     await page.undo();
@@ -2140,24 +2188,19 @@ async function runProbe(opts) {
 
     // scenario: the seed-1 head of the soak — column drag, undo, redo, then a
     // total width the grid cannot honour
-    await page.setField("จำนวนคอลัมน์", 3);
-    await page.update();
-    await sleep(250);
-    await probeStep(page, "cols back to 3");
     const grid3 = gridIds((await page.settle()).elements)[0];
     const cell3 = liveCells((await page.settle()).elements, grid3)[0];
     await page.clickCell(grid3, cell3.customData.r, cell3.customData.c);
     await sleep(150);
-    await page.dragSlider("col", -1037);
+    await page.dragSlider("col", -1037, grid3);
     await probeStep(page, "col slider");
     await page.undo();
     await probeStep(page, "col undo");
     await page.redo();
     await probeStep(page, "col redo");
-    await page.setField("ความกว้างรวม (px)", 80);
-    await page.update();
+    await page.dragSlider("row", -40, grid3);
     await sleep(300);
-    await probeStep(page, "width 80");
+    await probeStep(page, "row border drag");
 
     // A/B: is "drop an element by omitting it from updateScene" undoable?
     await probeUndoAB(page);

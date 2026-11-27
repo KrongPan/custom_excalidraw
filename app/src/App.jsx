@@ -1300,7 +1300,10 @@ export default function App() {
   }, []);
 
   const applyGrid = useCallback(
-    (meta, spec) => {
+    // `shift` says how many tracks were inserted (positive) or dropped
+    // (negative) before the old first track: texts are keyed by r:c, so without
+    // it every cell under a new top row would inherit its neighbour's words.
+    (meta, spec, { shift } = {}) => {
       const api = apiRef.current;
       if (!api) throw new Error("editor ยังไม่พร้อม");
       if (!meta?.grid) throw new Error("คลิกเลือกช่องในตารางก่อน");
@@ -1314,6 +1317,8 @@ export default function App() {
       const originX = Math.min(...mine.map((el) => el.x));
       const originY = Math.min(...mine.map((el) => el.y));
 
+      const shiftRows = Math.round(shift?.rows || 0);
+      const shiftCols = Math.round(shift?.cols || 0);
       const byId = new Map(mine.map((el) => [el.id, el]));
       const cellIds = new Set(mine.filter((el) => isGridCell(el, meta.grid)).map((el) => el.id));
       // a cell's text is bound by containerId, not by customData: pick up both
@@ -1359,7 +1364,8 @@ export default function App() {
       const restored = [];
       for (const el of placed) {
         if (!isGridCell(el, meta.grid)) continue;
-        const value = texts.get(`${el.customData.r}:${el.customData.c}`);
+        const { r: nr, c: nc } = el.customData;
+        const value = texts.get(`${nr - shiftRows}:${nc - shiftCols}`);
         if (!value) continue;
         const { r, c } = el.customData;
         restored.push(
@@ -1410,7 +1416,7 @@ export default function App() {
   );
 
   const growGrid = useCallback(
-    (meta, axis) => {
+    (meta, axis, side = "end") => {
       const mine = gridElements(meta?.grid);
       const metrics = gridMetrics(mine, meta?.grid);
       if (!metrics) throw new Error("คลิกเลือกช่องในตารางก่อน");
@@ -1418,6 +1424,9 @@ export default function App() {
       const colWidths = metrics.cols.map((col) => Math.round(col.width));
       const avgRow = Math.round(rowHeights.reduce((a, b) => a + b, 0) / Math.max(1, rowHeights.length));
       const avgCol = Math.round(colWidths.reduce((a, b) => a + b, 0) / Math.max(1, colWidths.length));
+      // a handle on the top or left edge inserts at the start, which pushes every
+      // existing cell one track along: the shift tells applyGrid to re-key texts
+      const atStart = side === "start";
       const spec =
         axis === "row"
           ? {
@@ -1425,7 +1434,7 @@ export default function App() {
               rows: meta.rows + 1,
               width: metrics.bounds.width,
               height: metrics.bounds.height + avgRow,
-              rowHeights: [...rowHeights, avgRow],
+              rowHeights: atStart ? [avgRow, ...rowHeights] : [...rowHeights, avgRow],
               colWidths,
             }
           : {
@@ -1434,43 +1443,58 @@ export default function App() {
               width: metrics.bounds.width + avgCol,
               height: metrics.bounds.height,
               rowHeights,
-              colWidths: [...colWidths, avgCol],
+              colWidths: atStart ? [avgCol, ...colWidths] : [...colWidths, avgCol],
             };
-      return applyGrid(meta, spec);
+      return applyGrid(meta, spec, {
+        shift: { rows: atStart && axis === "row" ? 1 : 0, cols: atStart && axis === "col" ? 1 : 0 },
+      });
     },
     [applyGrid, gridElements],
   );
 
-  /** Drop the last row/column of a table, keeping every other cell's text. */
+  /** Drop the first or last row/column of a table, keeping every other cell's text. */
   const shrinkGrid = useCallback(
-    (meta, axis) => {
+    (meta, axis, side = "end") => {
       const mine = gridElements(meta?.grid);
       const metrics = gridMetrics(mine, meta?.grid);
       if (!metrics) throw new Error("คลิกเลือกช่องในตารางก่อน");
       const rowHeights = metrics.rows.map((row) => Math.round(row.height));
       const colWidths = metrics.cols.map((col) => Math.round(col.width));
+      const atStart = side === "start";
       if (axis === "row") {
         if (meta.rows <= 1 || rowHeights.length <= 1) return 0;
-        const drop = rowHeights[rowHeights.length - 1];
-        return applyGrid(meta, {
-          columns: meta.cols,
-          rows: meta.rows - 1,
-          width: metrics.bounds.width,
-          height: Math.max(1, metrics.bounds.height - drop),
-          rowHeights: rowHeights.slice(0, -1),
-          colWidths,
-        });
+        const drop = atStart ? rowHeights[0] : rowHeights[rowHeights.length - 1];
+        const kept = atStart ? rowHeights.slice(1) : rowHeights.slice(0, -1);
+        return applyGrid(
+          meta,
+          {
+            columns: meta.cols,
+            rows: meta.rows - 1,
+            width: metrics.bounds.width,
+            height: Math.max(1, metrics.bounds.height - drop),
+            rowHeights: kept,
+            colWidths,
+          },
+          // dropping the first row pulls every surviving cell up one: their new
+          // r is one less than the old, so the lookup has to add it back
+          { shift: { rows: atStart ? -1 : 0, cols: 0 } },
+        );
       }
       if (meta.cols <= 1 || colWidths.length <= 1) return 0;
-      const drop = colWidths[colWidths.length - 1];
-      return applyGrid(meta, {
-        columns: meta.cols - 1,
-        rows: meta.rows,
-        width: Math.max(1, metrics.bounds.width - drop),
-        height: metrics.bounds.height,
-        rowHeights,
-        colWidths: colWidths.slice(0, -1),
-      });
+      const drop = atStart ? colWidths[0] : colWidths[colWidths.length - 1];
+      const kept = atStart ? colWidths.slice(1) : colWidths.slice(0, -1);
+      return applyGrid(
+        meta,
+        {
+          columns: meta.cols - 1,
+          rows: meta.rows,
+          width: Math.max(1, metrics.bounds.width - drop),
+          height: metrics.bounds.height,
+          rowHeights,
+          colWidths: kept,
+        },
+        { shift: { rows: 0, cols: atStart ? -1 : 0 } },
+      );
     },
     [applyGrid, gridElements],
   );
@@ -1558,13 +1582,7 @@ export default function App() {
     [applyResize, describeGrid, queueSave],
   );
 
-  /** Size one row (index r) of the selected grid; keeps everything below it in place. */
-  const resizeRow = useCallback((meta, r, height) => commitResize(meta, "row", r, height), [commitResize]);
-
-  /** Size one column (index c) of the selected grid; text rewraps to the new width. */
-  const resizeCol = useCallback((meta, c, width) => commitResize(meta, "col", c, width), [commitResize]);
-
-  /** Border drag from the canvas: same one-step preview/commit pair as a slider. */
+  /** Border drag from the canvas: preview while dragging, one commit on release. */
   const previewGridResize = useCallback(
     (gridId, axis, index, size) => {
       const api = apiRef.current;
@@ -1791,7 +1809,7 @@ export default function App() {
   /** The `+` handle on a table: grow that table in place by one row or column. */
   /** The edge handles: +1 appends a row/column, -1 drops the last one. */
   const changeGridFromHandle = useCallback(
-    (gridId, axis, kind, delta) => {
+    (gridId, axis, kind, delta, side = "end") => {
       const api = apiRef.current;
       if (!api) return;
       try {
@@ -1801,11 +1819,14 @@ export default function App() {
           const spec = describeClass(sceneNow, gridId);
           const lines = (spec?.fields || []).length;
           if (delta > 0) {
-            addClassRow({ grid: gridId, section: "fields", index: Math.max(0, lines - 1) });
+            // the top handle inserts a field above the list, the bottom one after
+            // the last line — a class has no columns, only this one axis
+            addClassRow({ grid: gridId, section: "fields", index: side === "start" ? 0 : Math.max(0, lines - 1) });
             return;
           }
           if (lines <= 1) return;
-          const kept = removeClassRows(spec, [{ section: "fields", index: lines - 1 }]);
+          const droppedIndex = side === "start" ? 0 : lines - 1;
+          const kept = removeClassRows(spec, [{ section: "fields", index: droppedIndex }]);
           const result = updateClass(sceneNow, gridId, { fields: kept.fields });
           if (!result) return;
           const selectedElementIds = {};
@@ -1823,8 +1844,8 @@ export default function App() {
         }
         const meta = describeGrid(sceneNow, gridId);
         if (!meta) return;
-        if (delta > 0) growGrid(meta, axis);
-        else shrinkGrid(meta, axis);
+        if (delta > 0) growGrid(meta, axis, side);
+        else shrinkGrid(meta, axis, side);
       } catch (error) {
         console.error("resize grid from handle failed", error);
       }
@@ -2269,12 +2290,6 @@ export default function App() {
         onInsert={insertTable}
         selected={selectedGrid}
         onUpdate={(spec) => applyGrid(selectedGrid, spec)}
-        onGrow={(axis) => growGrid(selectedGrid, axis)}
-        active={activeCell}
-        onResizeRow={(r, h) => resizeRow(selectedGrid, r, h)}
-        onResizeCol={(c, w) => resizeCol(selectedGrid, c, w)}
-        onPreviewRow={(r, h) => previewResize(selectedGrid, "row", r, h)}
-        onPreviewCol={(c, w) => previewResize(selectedGrid, "col", c, w)}
       />
 
       <ErBuilder
