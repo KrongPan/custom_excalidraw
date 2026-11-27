@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { tableBounds } from "./table.js";
 
-/* Two growth handles that ride whichever table the pointer is over: one on the
-   bottom edge that adds a row, one on the right edge that adds a column. The
-   table grows in place and never spawns a second one. Each button sits on the
-   axis it grows along, so the direction is obvious without a menu.
+/* Two pairs of handles that ride whichever table the pointer is over: a row
+   pair on the bottom edge and a column pair on the right edge, each pair
+   running along the axis it changes — + adds one more, - drops the last one.
+   Rows and columns are only ever added to or removed from the same table, so
+   nothing spawns a second grid.
 
    Like GridOverlay it paints into an overlay above the Excalidraw canvases and
    reads scene geometry every frame, so panning/zooming keeps the buttons glued
@@ -15,6 +16,8 @@ import { tableBounds } from "./table.js";
 const HIT_PAD = 30;
 /** The handles sit beside the edge, not on its border (screen px). */
 const HANDLE_GAP = 10;
+/** Gap between the + and - of one pair. */
+const PAIR_GAP = 6;
 /** Mousedown inside Excalidraw chrome is not a grid hover. */
 const IGNORE = ".grid-add, .relation-panel, .panel, .Island, .App-toolbar, .App-menu";
 
@@ -29,8 +32,17 @@ function gridAt(scene, x, y, pad = HIT_PAD) {
   for (const el of scene) {
     const grid = el.customData?.grid;
     if (!grid || el.isDeleted) continue;
-    if (!grids.has(grid)) grids.set(grid, { grid, kind: "table" });
-    if (el.customData?.class === true) grids.get(grid).kind = "class";
+    if (!grids.has(grid)) grids.set(grid, { grid, kind: "table", rows: 0, cols: 0 });
+    const info = grids.get(grid);
+    if (el.customData?.class === true) {
+      info.kind = "class";
+      // a class has no r/c on its rows: its field list is the row count
+      const fields = el.customData?.classData?.fields;
+      if (Array.isArray(fields)) info.rows = Math.max(info.rows, fields.length);
+    }
+    const { r, c } = el.customData || {};
+    if (Number.isInteger(r)) info.rows = Math.max(info.rows, r + 1);
+    if (Number.isInteger(c)) info.cols = Math.max(info.cols, c + 1);
   }
   let hit = null;
   for (const info of grids.values()) {
@@ -45,20 +57,39 @@ function gridAt(scene, x, y, pad = HIT_PAD) {
       bottom: bounds.top + bounds.height,
     };
     if (x >= box.left - pad && x <= box.right + pad && y >= box.top - pad && y <= box.bottom + pad) {
-      hit = { grid: info.grid, kind: info.kind, box };
+      hit = { grid: info.grid, kind: info.kind, box, rows: info.rows, cols: info.cols };
     }
   }
   return hit;
 }
 
-export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
+function PlusIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function MinusIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+export default function GridAddControl({ apiRef, canvasRef, onChange }) {
   const rootRef = useRef(null);
-  const rowRef = useRef(null);
-  const colRef = useRef(null);
+  const rowAddRef = useRef(null);
+  const rowDelRef = useRef(null);
+  const colAddRef = useRef(null);
+  const colDelRef = useRef(null);
   const pointerRef = useRef(null);
   const hoveredRef = useRef(null);
   const [visible, setVisible] = useState(false);
   const [kind, setKind] = useState("table");
+  const [counts, setCounts] = useState({ rows: 1, cols: 1 });
 
   useEffect(() => {
     const host = canvasRef.current;
@@ -109,24 +140,38 @@ export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
       if (nextGrid !== prevGrid) {
         hoveredRef.current = hit;
         setVisible(Boolean(hit));
-        if (hit) setKind(hit.kind);
+        if (hit) {
+          setKind(hit.kind);
+          setCounts({ rows: hit.rows, cols: hit.cols });
+        }
       } else if (hit) {
         hoveredRef.current = hit;
+        setCounts((prev) =>
+          prev.rows === hit.rows && prev.cols === hit.cols ? prev : { rows: hit.rows, cols: hit.cols },
+        );
       }
       if (!hit) return;
 
       const { box } = hit;
-      const rowX = (box.left + box.width / 2 + scrollX) * zoom;
+      const rowCentre = (box.left + box.width / 2 + scrollX) * zoom;
       const rowY = (box.bottom + scrollY) * zoom + HANDLE_GAP;
-      const row = rowRef.current;
-      if (row) {
-        row.style.transform = `translate(${Math.round(rowX - row.offsetWidth / 2)}px, ${Math.round(rowY)}px)`;
+      const rowAdd = rowAddRef.current;
+      const rowDel = rowDelRef.current;
+      if (rowAdd && rowDel) {
+        const pair = rowAdd.offsetWidth + PAIR_GAP + rowDel.offsetWidth;
+        const left = Math.round(rowCentre - pair / 2);
+        rowAdd.style.transform = `translate(${left}px, ${Math.round(rowY)}px)`;
+        rowDel.style.transform = `translate(${left + rowAdd.offsetWidth + PAIR_GAP}px, ${Math.round(rowY)}px)`;
       }
-      const col = colRef.current;
-      if (col) {
+      const colAdd = colAddRef.current;
+      const colDel = colDelRef.current;
+      if (colAdd && colDel) {
         const colX = (box.right + scrollX) * zoom + HANDLE_GAP;
-        const colY = (box.top + box.height / 2 + scrollY) * zoom;
-        col.style.transform = `translate(${Math.round(colX)}px, ${Math.round(colY - col.offsetHeight / 2)}px)`;
+        const colCentre = (box.top + box.height / 2 + scrollY) * zoom;
+        const pair = colAdd.offsetHeight + PAIR_GAP + colDel.offsetHeight;
+        const top = Math.round(colCentre - pair / 2);
+        colAdd.style.transform = `translate(${Math.round(colX)}px, ${top}px)`;
+        colDel.style.transform = `translate(${Math.round(colX)}px, ${top + colAdd.offsetHeight + PAIR_GAP}px)`;
       }
     };
 
@@ -137,55 +182,90 @@ export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
     };
   }, [apiRef, canvasRef]);
 
-  const grow = (axis) => {
+  const change = (axis, delta) => {
     const target = hoveredRef.current;
     hoveredRef.current = null;
     pointerRef.current = null;
     setVisible(false);
-    if (target && onGrow) onGrow(target.grid, axis, target.kind);
+    if (target && onChange) onChange(target.grid, axis, target.kind, delta);
   };
 
   const isClass = kind === "class";
+  const tabIndex = visible ? 0 : -1;
+  const rowFull = counts.rows <= 1;
+  const colFull = counts.cols <= 1;
 
   return (
     <div className={`grid-add${visible ? " visible" : ""}`} ref={rootRef} aria-hidden={!visible}>
       <button
-        ref={rowRef}
+        ref={rowAddRef}
         type="button"
         className="grid-add-btn grid-add-row"
         aria-label="เพิ่มแถว"
         title="เพิ่มแถว"
-        tabIndex={visible ? 0 : -1}
+        tabIndex={tabIndex}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          grow("row");
+          change("row", 1);
         }}
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
+        <PlusIcon />
+        แถว
+      </button>
+      <button
+        ref={rowDelRef}
+        type="button"
+        className="grid-add-btn grid-add-del grid-add-row-del"
+        aria-label="ลบแถว"
+        title={rowFull ? "เหลือแถวสุดท้ายแล้ว" : "ลบแถวสุดท้าย"}
+        tabIndex={tabIndex}
+        disabled={rowFull}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          change("row", -1);
+        }}
+      >
+        <MinusIcon />
         แถว
       </button>
       {isClass ? null : (
-        <button
-          ref={colRef}
-          type="button"
-          className="grid-add-btn grid-add-col"
-          aria-label="เพิ่มคอลัมน์"
-          title="เพิ่มคอลัมน์"
-          tabIndex={visible ? 0 : -1}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            grow("col");
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          คอลัมน์
-        </button>
+        <>
+          <button
+            ref={colAddRef}
+            type="button"
+            className="grid-add-btn grid-add-col"
+            aria-label="เพิ่มคอลัมน์"
+            title="เพิ่มคอลัมน์"
+            tabIndex={tabIndex}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              change("col", 1);
+            }}
+          >
+            <PlusIcon />
+            คอลัมน์
+          </button>
+          <button
+            ref={colDelRef}
+            type="button"
+            className="grid-add-btn grid-add-del grid-add-col-del"
+            aria-label="ลบคอลัมน์"
+            title={colFull ? "เหลือคอลัมน์สุดท้ายแล้ว" : "ลบคอลัมน์สุดท้าย"}
+            tabIndex={tabIndex}
+            disabled={colFull}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              change("col", -1);
+            }}
+          >
+            <MinusIcon />
+            คอลัมน์
+          </button>
+        </>
       )}
     </div>
   );

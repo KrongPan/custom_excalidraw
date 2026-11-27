@@ -1440,6 +1440,40 @@ export default function App() {
     [applyGrid, gridElements],
   );
 
+  /** Drop the last row/column of a table, keeping every other cell's text. */
+  const shrinkGrid = useCallback(
+    (meta, axis) => {
+      const mine = gridElements(meta?.grid);
+      const metrics = gridMetrics(mine, meta?.grid);
+      if (!metrics) throw new Error("คลิกเลือกช่องในตารางก่อน");
+      const rowHeights = metrics.rows.map((row) => Math.round(row.height));
+      const colWidths = metrics.cols.map((col) => Math.round(col.width));
+      if (axis === "row") {
+        if (meta.rows <= 1 || rowHeights.length <= 1) return 0;
+        const drop = rowHeights[rowHeights.length - 1];
+        return applyGrid(meta, {
+          columns: meta.cols,
+          rows: meta.rows - 1,
+          width: metrics.bounds.width,
+          height: Math.max(1, metrics.bounds.height - drop),
+          rowHeights: rowHeights.slice(0, -1),
+          colWidths,
+        });
+      }
+      if (meta.cols <= 1 || colWidths.length <= 1) return 0;
+      const drop = colWidths[colWidths.length - 1];
+      return applyGrid(meta, {
+        columns: meta.cols - 1,
+        rows: meta.rows,
+        width: Math.max(1, metrics.bounds.width - drop),
+        height: metrics.bounds.height,
+        rowHeights,
+        colWidths: colWidths.slice(0, -1),
+      });
+    },
+    [applyGrid, gridElements],
+  );
+
   /* --------------------------------------------------- table row/column sizes */
 
   /**
@@ -1732,26 +1766,47 @@ export default function App() {
   }, [canvasRef, queueSave]);
 
   /** The `+` handle on a table: grow that table in place by one row or column. */
-  const growGridFromHandle = useCallback(
-    (gridId, axis, kind) => {
+  /** The edge handles: +1 appends a row/column, -1 drops the last one. */
+  const changeGridFromHandle = useCallback(
+    (gridId, axis, kind, delta) => {
       const api = apiRef.current;
       if (!api) return;
       try {
         const sceneNow = api.getSceneElements();
         if (kind === "class" || isClassGrid(sceneNow, gridId)) {
-          // a class only grows its field list: its columns are fixed by the format
+          // a class only grows/shrinks its field list: the columns are the format
           const spec = describeClass(sceneNow, gridId);
           const lines = (spec?.fields || []).length;
-          addClassRow({ grid: gridId, section: "fields", index: Math.max(0, lines - 1) });
+          if (delta > 0) {
+            addClassRow({ grid: gridId, section: "fields", index: Math.max(0, lines - 1) });
+            return;
+          }
+          if (lines <= 1) return;
+          const kept = removeClassRows(spec, [{ section: "fields", index: lines - 1 }]);
+          const result = updateClass(sceneNow, gridId, { fields: kept.fields });
+          if (!result) return;
+          const selectedElementIds = {};
+          for (const el of result.elements) {
+            if (el.customData?.grid === gridId) selectedElementIds[el.id] = true;
+          }
+          api.updateScene({
+            elements: result.elements,
+            appState: { selectedElementIds },
+            captureUpdate: "IMMEDIATELY",
+          });
+          setActiveClassRows([]);
+          queueSave(api.getSceneElements(), api.getAppState(), api.getFiles());
           return;
         }
         const meta = describeGrid(sceneNow, gridId);
-        if (meta) growGrid(meta, axis);
+        if (!meta) return;
+        if (delta > 0) growGrid(meta, axis);
+        else shrinkGrid(meta, axis);
       } catch (error) {
-        console.error("grow grid failed", error);
+        console.error("resize grid from handle failed", error);
       }
     },
-    [addClassRow, describeGrid, growGrid],
+    [addClassRow, describeGrid, growGrid, queueSave, shrinkGrid],
   );
 
   /** ER tool: link the two picked classes with one crowfoot arrow. */
@@ -2150,7 +2205,7 @@ export default function App() {
           }}
         />
         <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
-        <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onGrow={growGridFromHandle} />
+        <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onChange={changeGridFromHandle} />
         <ErRowControls
           apiRef={apiRef}
           canvasRef={canvasRef}

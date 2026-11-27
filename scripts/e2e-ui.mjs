@@ -806,29 +806,40 @@ async function openEditor(boardId = BOARD) {
           const r = el.getBoundingClientRect();
           return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2 };
         };
+        const pair = (addSel, delSel) => {
+          const a = box(addSel);
+          const d = box(delSel);
+          if (!a || !d) return null;
+          const left = Math.min(a.left, d.left);
+          const right = Math.max(a.right, d.right);
+          const top = Math.min(a.top, d.top);
+          const bottom = Math.max(a.bottom, d.bottom);
+          return { left, right, top, bottom, cx: (left + right) / 2, cy: (top + bottom) / 2, add: a, del: d };
+        };
         return {
           table: { left: tl.x, top: tl.y, right: br.x, bottom: br.y, cx: (tl.x + br.x) / 2, cy: (tl.y + br.y) / 2 },
-          row: box(".grid-add-row"),
-          col: box(".grid-add-col"),
+          row: pair(".grid-add-row", ".grid-add-row-del"),
+          col: pair(".grid-add-col", ".grid-add-col-del"),
           labels: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label")),
+          disabled: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.disabled),
         };
       })()`);
     await hoverFrame(tableGrid);
     const handles = await handleBox(tableGrid);
     check(
-      "a table offers one handle per axis",
-      handles.labels.join("|") === "เพิ่มแถว|เพิ่มคอลัมน์",
+      "a table offers add and remove on both axes",
+      handles.labels.join("|") === "เพิ่มแถว|ลบแถว|เพิ่มคอลัมน์|ลบคอลัมน์",
       JSON.stringify(handles.labels),
     );
     check(
-      "+ แถว is centred under the bottom edge",
+      "the row pair is centred under the bottom edge",
       Boolean(handles.row) &&
         Math.abs(handles.row.cx - handles.table.cx) <= 2 &&
         handles.row.top >= handles.table.bottom - 1,
       `row ${JSON.stringify(handles.row)} table ${JSON.stringify(handles.table)}`,
     );
     check(
-      "+ คอลัมน์ is centred beside the right edge",
+      "the column pair is centred beside the right edge",
       Boolean(handles.col) &&
         Math.abs(handles.col.cy - handles.table.cy) <= 2 &&
         handles.col.left >= handles.table.right - 1,
@@ -861,6 +872,34 @@ async function openEditor(boardId = BOARD) {
       "+ คอลัมน์ adds a column to the same table",
       colGrown.cols === tableBefore.cols + 1 && colGrown.frames === tableBefore.frames,
       `${JSON.stringify(tableBefore)} -> ${JSON.stringify(colGrown)}`,
+    );
+
+    /* the minus half of each pair drops the last row/column of that same table */
+    await hoverFrame(tableGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-row-del").click()`);
+    await cdp.waitFor(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
+      return new Set(cells.map((el) => el.customData.r)).size === ${tableBefore.rows};
+    })()`, { label: "table lost a row" });
+    const rowBack = await gridShape(tableGrid);
+    check(
+      "- แถว drops the last row of the same table",
+      rowBack.rows === tableBefore.rows && rowBack.cols === colGrown.cols && rowBack.frames === tableBefore.frames,
+      `${JSON.stringify(colGrown)} -> ${JSON.stringify(rowBack)}`,
+    );
+    await hoverFrame(tableGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-col-del").click()`);
+    await cdp.waitFor(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.c != null && !el.isDeleted);
+      return new Set(cells.map((el) => el.customData.c)).size === ${tableBefore.cols};
+    })()`, { label: "table lost a column" });
+    const colBack = await gridShape(tableGrid);
+    check(
+      "- คอลัมน์ drops the last column of the same table",
+      colBack.cols === tableBefore.cols && colBack.rows === tableBefore.rows && colBack.frames === tableBefore.frames,
+      `${JSON.stringify(rowBack)} -> ${JSON.stringify(colBack)}`,
     );
 
     /* -------------------------------------------------------- save status */
@@ -1552,7 +1591,7 @@ async function openEditor(boardId = BOARD) {
     const classHandles = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label"))`);
     check(
       "a class grows only its field rows — it has no column handle",
-      classHandles.join("|") === "เพิ่มแถว",
+      classHandles.join("|") === "เพิ่มแถว|ลบแถว",
       JSON.stringify(classHandles),
     );
     await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
@@ -1561,6 +1600,13 @@ async function openEditor(boardId = BOARD) {
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore + 1};
     })()`.replace("__GRID__", firstClassGrid), { label: "class grew a field row" });
     check("+ แถว adds a field to the class", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
+    await hoverFrame(firstClassGrid);
+    await cdp.evaluate(`document.querySelector(".grid-add-row-del").click()`);
+    await cdp.waitFor(`(() => {
+      const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
+      return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore};
+    })()`.replace("__GRID__", firstClassGrid), { label: "class lost a field row" });
+    check("- แถว drops the last field of the class", (await classFields()) === fieldsBefore, `${fieldsBefore} fields`);
 
     /* two classes picked together are linked — never cloned */
     await openErPanel();

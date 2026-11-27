@@ -1201,6 +1201,37 @@ code {
   outline-offset: 2px;
 }
 
+/* The minus of a pair is quieter than the plus: it only turns red on hover. */
+.grid-add-btn.grid-add-del,
+.grid-add-btn.grid-add-del svg {
+  color: var(--muted);
+}
+
+.grid-add-btn.grid-add-del:hover {
+  background: #d64545;
+  border-color: #d64545;
+  color: #fff;
+}
+
+.grid-add-btn.grid-add-del:hover svg {
+  color: #fff;
+}
+
+.grid-add-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.grid-add-btn.grid-add-del:disabled:hover {
+  background: var(--panel);
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+.grid-add-btn.grid-add-del:disabled:hover svg {
+  color: var(--muted);
+}
+
 .relation-panel {
   position: absolute;
   z-index: 9;
