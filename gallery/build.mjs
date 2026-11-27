@@ -412,7 +412,7 @@ function renderPage(entries, generatedAt) {
       )}">
         <a class="shot" href="${href}" aria-label="เปิด ${escapeHtml(entry.title)}">${preview}</a>
         <div class="body">
-          <h2>${escapeHtml(entry.title)}</h2>
+          <h2><a class="title-link" href="${href}">${escapeHtml(entry.title)}</a></h2>
           ${entry.subtitle ? `<p class="sub">${escapeHtml(entry.subtitle)}</p>` : ""}
           <p class="meta" title="${escapeHtml(formatDate(entry.updated))}">${escapeHtml(bits.join(" · "))}</p>
           <div class="group-pick" hidden>
@@ -495,6 +495,11 @@ try {
     --panel-strong: rgba(255, 255, 255, 0.78);
     --head-a: rgba(255, 255, 255, 0.58);
     --head-b: rgba(255, 255, 255, 0.32);
+    /* the phone bar floats over live cards, so it needs far more body than the
+       desktop header: ≥0.82 alpha keeps the page behind it unrecognisable */
+    --sticky-a: rgba(255, 255, 255, 0.94);
+    --sticky-b: rgba(255, 255, 255, 0.86);
+    --field-fill: rgba(255, 255, 255, 0.92);
     --card-a: rgba(255, 255, 255, 0.42);
     --card-b: rgba(255, 255, 255, 0.22);
     --shot-a: rgba(255, 255, 255, 0.68);
@@ -561,6 +566,9 @@ try {
     --panel-strong: rgba(30, 35, 56, 0.85);
     --head-a: rgba(28, 32, 52, 0.85);
     --head-b: rgba(18, 21, 36, 0.66);
+    --sticky-a: rgba(30, 34, 55, 0.94);
+    --sticky-b: rgba(18, 21, 36, 0.88);
+    --field-fill: rgba(9, 12, 22, 0.92);
     --card-a: rgba(32, 37, 58, 0.74);
     --card-b: rgba(20, 23, 39, 0.56);
     --shot-a: rgba(255, 255, 255, 0.07);
@@ -810,6 +818,11 @@ try {
   .body { display: flex; flex-direction: column; gap: 3px; padding: 12px 13px 13px; }
   /* long board names should wrap inside the card, not get sliced at its edge */
   h2 { margin: 0; font-size: 14.5px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  /* the title opens the board the way the preview does; every other control in
+     the card is its own button or link, so it never inherits this navigation */
+  .title-link { color: inherit; text-decoration: none; }
+  .title-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+  .title-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
   .sub { margin: 0; color: var(--muted); font-size: 12px; }
   .meta {
     margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45;
@@ -994,14 +1007,17 @@ try {
       position: sticky; top: 8px; z-index: 20;
       max-width: 1180px; margin: 0 auto 12px; padding: 9px 11px;
       border: 1px solid var(--glass-line); border-radius: 16px;
-      background: linear-gradient(180deg, var(--head-a), var(--head-b));
+      background: linear-gradient(180deg, var(--sticky-a), var(--sticky-b));
       backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
       box-shadow: var(--shadow);
     }
+    /* the field keeps its own fill, so a card scrolling underneath the bar can
+       never read through the search box */
+    input[type="search"] { background: var(--field-fill); }
     #groupbar {
       max-width: 1180px; margin: 0 auto 18px; padding: 8px 11px;
       border: 1px solid var(--glass-line); border-radius: 14px;
-      background: linear-gradient(180deg, var(--head-a), var(--head-b));
+      background: linear-gradient(180deg, var(--sticky-a), var(--sticky-b));
       backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
       box-shadow: var(--shadow);
     }
@@ -1088,6 +1104,10 @@ try {
   }
   .modal-card h2 { margin: 0 0 8px; font-size: 16px; }
   .modal-card p { margin: 0 0 16px; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+  /* the board name leads the delete confirmation; the file id trails it muted */
+  #del-detail { margin: 0 0 16px; }
+  #del-detail .del-name { margin: 0 0 3px; font-size: 13px; font-weight: 600; color: var(--ink); }
+  #del-detail .del-file { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); word-break: break-all; }
   .modal-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
   .field { display: flex; flex-direction: column; gap: 6px; margin: 0 0 14px; }
   .field span { font-size: 11.5px; color: var(--muted); }
@@ -1140,6 +1160,25 @@ try {
     max-width: 1180px; margin: 26px auto 0; color: var(--muted); font-size: 11px;
   }
   .empty { max-width: 1180px; margin: 38px auto; color: var(--muted); font-size: 13px; }
+  /* shown only when the catalogue and the server disagree: the static cards
+     stay put and this banner explains why they may be stale */
+  #server-banner {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    max-width: 1180px; margin: 0 auto 14px; padding: 9px 12px;
+    border: 1px solid var(--danger-line); border-radius: 14px;
+    background: var(--panel-strong); color: var(--ink); font-size: 12.5px;
+    box-shadow: var(--shadow);
+    backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  }
+  #server-banner[hidden] { display: none; }
+  #server-banner .banner-text { flex: 1 1 220px; min-width: 0; line-height: 1.45; }
+  #server-banner .banner-retry,
+  #server-banner .banner-close {
+    font: inherit; font-size: 12.5px; cursor: pointer; border-radius: 9px;
+    border: 1px solid var(--line-strong); background: var(--ghost-bg); color: var(--ink);
+  }
+  #server-banner .banner-retry { padding: 6px 13px; border-color: var(--accent); background: var(--accent-soft); }
+  #server-banner .banner-close { padding: 6px 9px; }
   #toast {
     position: fixed; left: 50%; bottom: 22px; z-index: 60;
     transform: translateX(-50%) translateY(8px);
@@ -1158,13 +1197,15 @@ try {
      the filter dot. Segments of the view switch grow vertically only — 40px
      wide segments would overlap and steal each other's taps. */
   .themebtn, .view-btn, .chip, #group-new, .sect-toggle, .sect-btn, .iconbtn,
-  .card-group, .app-link, .primary, .ghost, .dangerbtn, .group-menu .group-clear {
+  .card-group, .app-link, .primary, .ghost, .dangerbtn, .group-menu .group-clear,
+  #server-banner .banner-retry, #server-banner .banner-close {
     position: relative;
   }
   .themebtn::before, .bar-toggle::before, .view-btn::before, .chip::before,
   #group-new::before, .sect-toggle::before, .sect-btn::before, .iconbtn::before,
   .card-group::before, .app-link::before, .primary::before, .ghost::before,
-  .dangerbtn::before, .group-menu .group-clear::before {
+  .dangerbtn::before, .group-menu .group-clear::before,
+  #server-banner .banner-retry::before, #server-banner .banner-close::before {
     content: ""; position: absolute; left: 50%; top: 50%;
     width: max(100%, 40px); height: max(100%, 40px);
     transform: translate(-50%, -50%);
@@ -1183,7 +1224,7 @@ try {
     body[data-view="bento"] .card[data-weight="large"] .meta { font-size: 13px; }
   }
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    header, #groupbar, .top, .card, .modal-card { background: var(--fallback-bg); }
+    header, #groupbar, .top, .card, .modal-card, #server-banner { background: var(--fallback-bg); }
   }
 </style>
 </head>
@@ -1227,6 +1268,11 @@ try {
     <button id="group-new" type="button">+ หมวดใหม่</button>
   </div>
 </header>
+<div id="server-banner" role="alert" hidden>
+  <span class="banner-text"></span>
+  <button class="banner-retry" type="button">ลองอีกครั้ง</button>
+  <button class="banner-close" type="button" aria-label="ปิดข้อความแจ้งเตือน" title="ปิด">✕</button>
+</div>
 <main id="boards">
 <div id="sections">
 <div class="grid" id="grid">
@@ -1234,13 +1280,15 @@ ${cards}
 </div>
 </div>
 </main>
-${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่มีกระดานในเซิร์ฟเวอร์นี้ — กด “+ กระดานใหม่” เพื่อเริ่ม</p>' : ""}
-<p class="empty" id="empty" hidden>ไม่พบกระดานที่ตรงกับชื่อนี้</p>
+<p class="empty" id="empty" hidden></p>
 <footer>อัปเดต ${escapeHtml(generatedAt)}</footer>
 <div class="modal" id="del-modal" hidden>
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="del-title">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="del-title" tabindex="-1">
     <h2 id="del-title">ลบกระดานนี้?</h2>
-    <p id="del-detail"></p>
+    <div id="del-detail">
+      <p class="del-name"></p>
+      <p class="del-file"></p>
+    </div>
     <div class="modal-actions">
       <button class="ghost" type="button" id="del-cancel">ยกเลิก</button>
       <button class="holdbtn" type="button" id="del-hold">
@@ -1251,7 +1299,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   </div>
 </div>
 <div class="modal" id="rename-modal" hidden>
-  <form class="modal-card" id="rename-form" role="dialog" aria-modal="true" aria-labelledby="rename-title" novalidate>
+  <form class="modal-card" id="rename-form" role="dialog" aria-modal="true" aria-labelledby="rename-title" novalidate tabindex="-1">
     <h2 id="rename-title">แก้ชื่อกระดาน</h2>
     <p>ชื่อนี้จะแสดงในหน้ารวมและในหน้าแก้ไขทันที</p>
     <label class="field" for="rename-input">
@@ -1266,7 +1314,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   </form>
 </div>
 <div class="modal" id="group-modal" hidden>
-  <form class="modal-card" id="group-form" role="dialog" aria-modal="true" aria-labelledby="group-modal-title" novalidate>
+  <form class="modal-card" id="group-form" role="dialog" aria-modal="true" aria-labelledby="group-modal-title" novalidate tabindex="-1">
     <h2 id="group-modal-title">หมวดใหม่</h2>
     <p id="group-modal-sub">ตั้งชื่อหมวดเพื่อจัดกลุ่มกระดานในหน้ารวมนี้</p>
     <label class="field" for="group-name">
@@ -1290,7 +1338,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   </form>
 </div>
 <div class="modal" id="group-del-modal" hidden>
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="group-del-title">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="group-del-title" tabindex="-1">
     <h2 id="group-del-title">ลบหมวดนี้?</h2>
     <p id="group-del-detail"></p>
     <div class="modal-actions">
@@ -1299,7 +1347,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     </div>
   </div>
 </div>
-<p id="toast" hidden></p>
+<p id="toast" role="status" aria-live="polite" hidden></p>
 <script>
   const q = document.getElementById("q");
   const boardsEl = document.getElementById("boards");
@@ -1309,6 +1357,44 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   const groupChips = document.getElementById("group-chips");
   const groupNew = document.getElementById("group-new");
   const toastEl = document.getElementById("toast");
+  const banner = document.getElementById("server-banner");
+  const bannerText = banner.querySelector(".banner-text");
+  const NO_BOARDS_TEXT = "ยังไม่มีกระดานในเซิร์ฟเวอร์นี้ — กด “+ กระดานใหม่” เพื่อเริ่ม";
+  const NO_MATCH_TEXT = "ไม่พบกระดานที่ตรงกับชื่อนี้";
+  const NO_GROUP_TEXT = "ไม่มีกระดานในหมวดนี้ — เลือก “ทั้งหมด” หรือย้ายกระดานเข้าหมวดนี้";
+  const SERVER_DOWN_TEXT =
+    "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — รายการที่เห็นคือชุดที่สร้างไว้ตอน build จึงอาจไม่ใช่ข้อมูลล่าสุด";
+  const STALE_LIST_TEXT = "เซิร์ฟเวอร์ไม่ได้ส่งรายการกระดานมา — ยังแสดงชุดที่สร้างไว้แทน";
+  const GROUPS_DOWN_TEXT = "โหลดรายการหมวดไม่สำเร็จ — แสดงกระดานทั้งหมดโดยไม่แบ่งหมวด";
+
+  function showBanner(text) {
+    bannerText.textContent = text;
+    banner.hidden = false;
+  }
+
+  function hideBanner() {
+    banner.hidden = true;
+  }
+
+  banner.querySelector(".banner-retry").addEventListener("click", () => {
+    hideBanner();
+    bootBoards();
+    loadGroups();
+  });
+  banner.querySelector(".banner-close").addEventListener("click", hideBanner);
+
+  // The page has exactly one empty state. Boot, the search box and the group
+  // chips all funnel through applyFilter, so the text always matches why the
+  // grid is empty instead of guessing when the HTML was written.
+  function updateEmpty(shown) {
+    empty.textContent = !prototypes.size
+      ? NO_BOARDS_TEXT
+      : q.value.trim()
+        ? NO_MATCH_TEXT
+        : NO_GROUP_TEXT;
+    empty.hidden = shown.size !== 0;
+  }
+
   // the same glyphs the built page uses, so cards added at runtime look identical
   const ICONS = {
     download: ${JSON.stringify(ICON_DOWNLOAD)},
@@ -1317,6 +1403,15 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     chevron: ${JSON.stringify(ICON_CHEVRON)},
   };
   const COLORS = ["violet", "blue", "teal", "amber", "rose", "slate"];
+  // same short months the builder uses, so a card added at runtime reads Thai
+  const TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  function thaiDay(ms) {
+    const date = new Date(ms);
+    return date.getDate() + " " + TH_MONTHS[date.getMonth()];
+  }
+  function thaiDate(ms) {
+    return thaiDay(ms) + " " + new Date(ms).getFullYear();
+  }
   const NONE_KEY = "__none__";
   // กรองด้วยชิป: "all" = ทุกหมวด, otherwise a group id
   let activeGroup = "all";
@@ -1329,6 +1424,9 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
      cannot stand in two places and a board may now belong to several groups.
      data-slug stays the board identity on every copy. */
   const prototypes = new Map();
+  // board slug -> lowercase search haystack, built once per card so typing does
+  // not re-lowercase every title on every keystroke
+  const searchText = new Map();
   /* The one open group menu, remembered across layout(): a tick rebuilds the
      sections, and the menu must stay open under the pointer for the next tick. */
   let openMenu = null;
@@ -1436,7 +1534,9 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     return dot;
   }
 
-  function toast(text) {
+  function toast(text, kind) {
+    // errors stay long enough to read twice; confirmations can go sooner
+    const hold = kind === "error" ? 4000 : 2600;
     toastEl.textContent = text;
     toastEl.hidden = false;
     requestAnimationFrame(() => toastEl.classList.add("on"));
@@ -1445,7 +1545,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     toast.hideTimer = setTimeout(() => {
       toastEl.classList.remove("on");
       toast.offTimer = setTimeout(() => { toastEl.hidden = true; }, 220);
-    }, 2600);
+    }, hold);
   }
 
   /* ----------------------------------------------------------- card copies */
@@ -1467,6 +1567,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (!card || !card.dataset.slug) return;
     card.hidden = false;
     prototypes.set(card.dataset.slug, card);
+    searchText.set(card.dataset.slug, (card.dataset.search || "").toLowerCase());
   }
 
   function cardCopy(slug, sectionKey) {
@@ -1605,6 +1706,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
           status === 404
             ? "ไม่พบหมวดหรือกระดานนี้แล้ว — ยังไม่ได้บันทึก"
             : "บันทึกหมวดไม่สำเร็จ (เซิร์ฟเวอร์ไม่รับค่า)",
+          "error",
         );
       });
   }
@@ -1756,7 +1858,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     const shown = new Set();
     for (const card of cards()) {
       const slug = card.dataset.slug;
-      const hit = !needle || (card.dataset.search || "").includes(needle);
+      const hit = !needle || (searchText.get(slug) || "").includes(needle);
       // a chip narrows to that group's own section: a board filed under two
       // groups otherwise shows up once per section, which reads as a duplicate
       const inChip = activeGroup === "all" || (card.dataset.section || "") === activeGroup;
@@ -1780,10 +1882,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     count.textContent = scoped
       ? shown.size + " จาก " + prototypes.size
       : prototypes.size + " กระดาน";
-    empty.textContent = needle
-      ? "ไม่พบกระดานที่ตรงกับชื่อนี้"
-      : "ไม่มีกระดานในหมวดนี้ — เลือก “ทั้งหมด” หรือย้ายกระดานเข้าหมวดนี้";
-    empty.hidden = shown.size !== 0;
+    updateEmpty(shown);
     // the folded bar mirrors the chip row: filter dot, or the group name itself
     syncBarChrome();
   }
@@ -1799,9 +1898,12 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (!card) return;
     const name = title || id;
     const sub = subtitle || "";
+    const titleLink = card.querySelector("h2 .title-link");
     const h2 = card.querySelector("h2");
-    if (h2) h2.textContent = name;
+    if (titleLink) titleLink.textContent = name;
+    else if (h2) h2.textContent = name;
     card.dataset.search = (id + " " + name + " " + sub).toLowerCase();
+    searchText.set(id, card.dataset.search);
     const shot = card.querySelector("a.shot");
     if (shot) shot.setAttribute("aria-label", "เปิด " + name);
     const rename = card.querySelector(".rename");
@@ -1827,7 +1929,18 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     for (const card of cardsFor(slug)) paintCardTitle(card, slug, title, subtitle);
   }
 
-  q.addEventListener("input", applyFilter);
+  // 120ms is short enough to feel live and long enough to coalesce fast typing
+  let filterTimer = 0;
+  let lastQuery = q.value;
+  q.addEventListener("input", () => {
+    // a several-character drop (paste, autofill) is one intent and filters at
+    // once; single keystrokes wait for the pause so a burst filters once
+    const jumped = Math.abs(q.value.length - lastQuery.length) > 2;
+    lastQuery = q.value;
+    clearTimeout(filterTimer);
+    filterTimer = jumped ? 0 : setTimeout(applyFilter, 120);
+    if (jumped) applyFilter();
+  });
 
   /* ----------------------------------------------------------------- theme */
   const themeBtn = document.getElementById("theme-toggle");
@@ -2016,14 +2129,12 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
 
   function loadGroups() {
     return fetch("/api/groups")
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
       .then((data) => {
-        if (!data || !Array.isArray(data.groups)) {
-          groups = [];
-          groupsSettled = true;
-          syncBarChrome();
-          return false;
-        }
+        if (!data || !Array.isArray(data.groups)) throw new Error("bad /api/groups answer");
         groups = data.groups.map(normalizeGroup).filter(Boolean);
         if (!groupById(activeGroup)) activeGroup = "all";
         groupsSettled = true;
@@ -2032,9 +2143,11 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         applyFilter();
         return true;
       })
-      .catch(() => {
+      .catch((error) => {
         groups = [];
         groupsSettled = true;
+        showBanner(GROUPS_DOWN_TEXT);
+        console.warn("boot: /api/groups failed", error);
         syncBarChrome();
         return false;
       });
@@ -2152,6 +2265,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (groupBusy) return;
     const trigger = groupModal._trigger;
     groupModal.hidden = true;
+    syncModals();
     groupModal._trigger = null;
     groupEditId = null;
     if (trigger && trigger.isConnected) trigger.focus();
@@ -2199,6 +2313,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         groupSave.textContent = editing ? "บันทึกการแก้ไข" : "สร้างหมวด";
         const trigger = groupModal._trigger;
         groupModal.hidden = true;
+        syncModals();
         groupModal._trigger = null;
         groupEditId = null;
         layout();
@@ -2245,6 +2360,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (gdelBusy) return;
     const trigger = gdelModal._trigger;
     gdelModal.hidden = true;
+    syncModals();
     gdelModal._trigger = null;
     gdelGroup = null;
     if (trigger && trigger.isConnected) trigger.focus();
@@ -2277,6 +2393,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         gdelConfirm.textContent = "ลบหมวด";
         const trigger = gdelModal._trigger;
         gdelModal.hidden = true;
+        syncModals();
         gdelModal._trigger = null;
         gdelGroup = null;
         layout();
@@ -2292,7 +2409,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         gdelBusy = false;
         gdelConfirm.disabled = false;
         gdelConfirm.textContent = "ลบหมวด";
-        toast(err && err.message ? err.message : "ลบหมวดไม่สำเร็จ");
+        toast(err && err.message ? err.message : "ลบหมวดไม่สำเร็จ", "error");
       });
   });
 
@@ -2335,6 +2452,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (renameBusy) return;
     const trigger = renameModal._trigger;
     renameModal.hidden = true;
+    syncModals();
     renameModal._trigger = null;
     renameId = null;
     if (trigger && trigger.isConnected) trigger.focus();
@@ -2375,6 +2493,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         renameSave.disabled = false;
         renameSave.textContent = "บันทึกชื่อ";
         renameModal.hidden = true;
+        syncModals();
         renameModal._trigger = null;
         renameId = null;
         if (trigger && trigger.isConnected) trigger.focus();
@@ -2406,14 +2525,26 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   let holdRaf = 0;
   let holdStart = 0;
   let deleting = false;
+  let deleteTrigger = null;
 
-  function openDelete(id) {
+  // A dialog takes focus when it opens, so the control that opened it is who
+  // gets focus back on close. If that control is gone (the card was deleted),
+  // the search box is the nearest sensible place.
+  function restoreFocus(trigger) {
+    if (trigger && trigger.isConnected && !trigger.closest("[inert]")) trigger.focus();
+    else q.focus();
+  }
+
+  function openDelete(id, trigger) {
     if (!groupModal.hidden && !groupBusy) closeGroupModal();
     if (!gdelModal.hidden && !gdelBusy) closeGroupDelete();
     if (!renameModal.hidden && !renameBusy) closeRename();
     pendingId = id;
+    deleteTrigger = trigger || null;
     deleting = false;
-    detail.textContent = id + ".excalidraw จะถูกลบถาวรพร้อมประวัติเซฟย้อนหลัง กู้คืนไม่ได้";
+    detail.querySelector(".del-name").textContent = cardTitle(id);
+    detail.querySelector(".del-file").textContent =
+      id + ".excalidraw จะถูกลบถาวรพร้อมประวัติเซฟย้อนหลัง กู้คืนไม่ได้";
     holdFill.style.width = "0%";
     holdLbl.textContent = "กดค้างเพื่อลบ";
     holdBtn.disabled = false;
@@ -2427,7 +2558,11 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     holdRaf = 0;
     holdFill.style.width = "0%";
     modal.hidden = true;
+    syncModals();
     pendingId = null;
+    const trigger = deleteTrigger;
+    deleteTrigger = null;
+    restoreFocus(trigger);
   }
 
   function stopHold() {
@@ -2453,9 +2588,13 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
         membership.delete(id);
         deleting = false;
         modal.hidden = true;
+        syncModals();
         pendingId = null;
+        const trigger = deleteTrigger;
+        deleteTrigger = null;
         layout();
         applyFilter();
+        restoreFocus(trigger);
       })
       .catch(() => {
         deleting = false;
@@ -2532,7 +2671,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
     if (!btn || btn.disabled) return;
     event.preventDefault();
     const id = btn.dataset.id;
-    if (id) openDelete(id);
+    if (id) openDelete(id, btn);
   });
 
   // ticking/unticking any group sends the whole membership in one PATCH
@@ -2561,13 +2700,82 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   modal.addEventListener("pointerdown", (event) => {
     if (event.target === modal) closeDelete();
   });
+
+  /* ------------------------------------------------------------ modal trap */
+  // While a dialog is open the rest of the page is inert, so Tab, clicks and
+  // screen-reader navigation stay inside it. The open set is read from the DOM
+  // on every change, which also covers the submit paths that hide a dialog
+  // without going through closeX().
+  function syncModals() {
+    const anyOpen = [...document.querySelectorAll(".modal")].some((box) => !box.hidden);
+    for (const child of document.body.children) {
+      if (child.tagName === "SCRIPT" || child.classList.contains("modal")) continue;
+      // the toast is a live region, not a control: keep it announcing
+      if (child === toastEl) continue;
+      child.inert = anyOpen;
+    }
+  }
+
+  function topModal() {
+    const open = [...document.querySelectorAll(".modal")].filter((box) => !box.hidden);
+    return open.length ? open[open.length - 1] : null;
+  }
+
+  function focusablesIn(root) {
+    const selector = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    return [...root.querySelectorAll(selector)].filter(
+      (el) => !el.disabled && el.getClientRects().length > 0,
+    );
+  }
+
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Tab") return;
+      const box = topModal();
+      if (!box) return;
+      const card = box.querySelector(".modal-card");
+      if (!card) return;
+      const items = focusablesIn(card);
+      if (!items.length) {
+        event.preventDefault();
+        card.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const inside = card.contains(active);
+      if (event.shiftKey) {
+        if (!inside || active === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    },
+    true,
+  );
+
+  for (const box of document.querySelectorAll(".modal")) {
+    new MutationObserver(syncModals).observe(box, {
+      attributes: true,
+      attributeFilter: ["hidden"],
+    });
+  }
+  syncModals();
+
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (openMenu) hideMenus(true);
-    else if (!groupModal.hidden) closeGroupModal();
+    // a dialog is modal, so it is what Escape must close first, even if a card
+    // menu was left open underneath the scrim
+    if (!groupModal.hidden) closeGroupModal();
     else if (!gdelModal.hidden) closeGroupDelete();
     else if (!renameModal.hidden) closeRename();
     else if (!modal.hidden) closeDelete();
+    else if (openMenu) hideMenus(true);
   });
   holdBtn.addEventListener("pointerdown", startHold);
   holdBtn.addEventListener("pointerup", stopHold);
@@ -2580,76 +2788,94 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   });
 
   // Boards saved through the editor may not have a rendered preview yet: list
-  // them straight from the API so nothing on the server is invisible.
-  fetch("/api/boards")
-    .then((res) => (res.ok ? res.json() : null))
-    .then((data) => {
-      if (!data || !Array.isArray(data.boards)) return;
-      const boards = data.boards;
-      const alive = new Set(boards.map((board) => board.id));
-      // The page is a snapshot: a board deleted after the last build must not
-      // stay clickable here until someone rebuilds the catalog.
-      let removed = 0;
-      for (const slug of [...prototypes.keys()]) {
-        if (alive.has(slug)) continue;
-        prototypes.delete(slug);
-        membership.delete(slug);
-        removed += 1;
-      }
-      // Renames in the editor only write the sidecar, so the static card keeps
-      // the name it was built with. Refresh it here instead of keeping two
-      // names for the same board until someone rebuilds the catalogue.
-      const byId = new Map(boards.map((board) => [board.id, board]));
-      for (const slug of [...prototypes.keys()]) {
-        const board = byId.get(slug);
-        if (!board) continue;
-        updateCardTitle(slug, board.title || board.id, board.subtitle || "");
-      }
-      const known = new Set(prototypes.keys());
-      let added = 0;
-      for (const board of boards) {
-        if (known.has(board.id)) continue;
-        const href = "/b/" + encodeURIComponent(board.id);
-        const card = document.createElement("article");
-        card.className = "card";
-        card.dataset.slug = board.id;
-        card.dataset.weight = weightFor(board.elements);
-        card.dataset.group = "";
-        card.dataset.groups = "";
-        card.dataset.search = (board.id + " " + (board.title || "")).toLowerCase();
-        card.innerHTML =
-          '<a class="shot" href="' + href + '"><span class="placeholder">บันทึกบนเซิร์ฟเวอร์</span></a>' +
-          '<div class="body"><h2></h2><p class="meta"></p>' +
-          '<div class="group-pick" hidden><button type="button" class="card-group" aria-haspopup="true" aria-expanded="false">' +
-          '<span class="lbl">ไม่มีหมวด</span><span class="chev">' + ICONS.chevron + '</span></button>' +
-          '<div class="group-menu" hidden></div></div>' +
-          '<div class="actions">' +
-          '<a class="primary" href="' + href + '">เปิด</a><span class="grow"></span>' +
-          '<button class="iconbtn rename" type="button" aria-label="แก้ชื่อกระดาน" title="แก้ชื่อกระดาน">' +
-          ICONS.pencil + '<span>แก้ชื่อ</span></button>' +
-          '<a class="iconbtn" download aria-label="ดาวน์โหลด" title="ดาวน์โหลด">' + ICONS.download + '</a>' +
-          '<button class="iconbtn danger del" type="button" aria-label="ลบกระดาน" title="ลบ">' +
-          ICONS.trash + '<span>ลบ</span></button></div></div>';
-        card.querySelector(".rename").dataset.id = board.id;
-        card.querySelector(".del").dataset.id = board.id;
-        card.querySelector(".meta").textContent =
-          (board.elements ?? "?") + " elements · " + fmtSize(board.bytes) + " · " +
-          new Date(board.updated).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-        card.querySelector(".meta").title = new Date(board.updated).toLocaleDateString("en-GB", {
-          day: "numeric", month: "short", year: "numeric",
-        });
-        card.querySelector("a.iconbtn").href = "/scenes/" + encodeURIComponent(board.id) + ".excalidraw";
-        paintCardTitle(card, board.id, board.title || board.id, board.subtitle || "");
-        registerCard(card);
-        added += 1;
-      }
-      if (added || removed) {
-        layout();
-        applyFilter();
-      }
-      loadMembership(boards);
-    })
-    .catch(() => {});
+  // them straight from the API so nothing on the server is invisible. The
+  // banner's retry button calls this again; a failure must not blank the page,
+  // because the cards on screen are the last known good state.
+  function bootBoards() {
+    return fetch("/api/boards")
+      .then((res) => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then((data) => {
+        if (!data || !Array.isArray(data.boards)) throw new Error("bad /api/boards answer");
+        const boards = data.boards;
+        const alive = new Set(boards.map((board) => board.id));
+        // An empty answer while the page shows cards is stale data, not a set of
+        // deletions: pruning on it would wipe a grid that was fine a moment ago.
+        // Keep the built cards, say so, and let the retry button ask again. Any
+        // non-empty answer is trusted, so a board deleted elsewhere still goes.
+        const stale = boards.length === 0 && prototypes.size > 0;
+        let removed = 0;
+        if (stale) showBanner(STALE_LIST_TEXT);
+        // The page is a snapshot: a board deleted after the last build must not
+        // stay clickable here until someone rebuilds the catalog.
+        if (!stale) {
+          for (const slug of [...prototypes.keys()]) {
+            if (alive.has(slug)) continue;
+            prototypes.delete(slug);
+            searchText.delete(slug);
+            membership.delete(slug);
+            removed += 1;
+          }
+        }
+        // Renames in the editor only write the sidecar, so the static card keeps
+        // the name it was built with. Refresh it here instead of keeping two
+        // names for the same board until someone rebuilds the catalogue.
+        const byId = new Map(boards.map((board) => [board.id, board]));
+        for (const slug of [...prototypes.keys()]) {
+          const board = byId.get(slug);
+          if (!board) continue;
+          updateCardTitle(slug, board.title || board.id, board.subtitle || "");
+        }
+        const known = new Set(prototypes.keys());
+        let added = 0;
+        for (const board of boards) {
+          if (known.has(board.id)) continue;
+          const href = "/b/" + encodeURIComponent(board.id);
+          const card = document.createElement("article");
+          card.className = "card";
+          card.dataset.slug = board.id;
+          card.dataset.weight = weightFor(board.elements);
+          card.dataset.group = "";
+          card.dataset.groups = "";
+          card.dataset.search = (board.id + " " + (board.title || "")).toLowerCase();
+          card.innerHTML =
+            '<a class="shot" href="' + href + '"><span class="placeholder">บันทึกบนเซิร์ฟเวอร์</span></a>' +
+            '<div class="body"><h2><a class="title-link" href="' + href + '"></a></h2><p class="meta"></p>' +
+            '<div class="group-pick" hidden><button type="button" class="card-group" aria-haspopup="true" aria-expanded="false">' +
+            '<span class="lbl">ไม่มีหมวด</span><span class="chev">' + ICONS.chevron + '</span></button>' +
+            '<div class="group-menu" hidden></div></div>' +
+            '<div class="actions">' +
+            '<a class="primary" href="' + href + '">เปิด</a><span class="grow"></span>' +
+            '<button class="iconbtn rename" type="button" aria-label="แก้ชื่อกระดาน" title="แก้ชื่อกระดาน">' +
+            ICONS.pencil + '<span>แก้ชื่อ</span></button>' +
+            '<a class="iconbtn" download aria-label="ดาวน์โหลด" title="ดาวน์โหลด">' + ICONS.download + '</a>' +
+            '<button class="iconbtn danger del" type="button" aria-label="ลบกระดาน" title="ลบ">' +
+            ICONS.trash + '<span>ลบ</span></button></div></div>';
+          card.querySelector(".rename").dataset.id = board.id;
+          card.querySelector(".del").dataset.id = board.id;
+          card.querySelector(".meta").textContent =
+            (board.elements ?? "?") + " องค์ประกอบ · " + fmtSize(board.bytes) + " · " + thaiDay(board.updated);
+          card.querySelector(".meta").title = thaiDate(board.updated);
+          card.querySelector("a.iconbtn").href = "/scenes/" + encodeURIComponent(board.id) + ".excalidraw";
+          paintCardTitle(card, board.id, board.title || board.id, board.subtitle || "");
+          registerCard(card);
+          added += 1;
+        }
+        if (added || removed) {
+          layout();
+          applyFilter();
+        }
+        // a short answer cannot describe the boards it omits, so keep the
+        // membership the builder wrote instead of asking each board's meta
+        if (!stale) loadMembership(boards);
+      })
+      .catch((error) => {
+        showBanner(SERVER_DOWN_TEXT);
+        console.warn("boot: /api/boards failed", error);
+      });
+  }
 
   // start from the group hints the builder wrote, then let the API correct them
   for (const card of cards()) {
@@ -2660,6 +2886,7 @@ ${entries.length === 0 ? '<p class="empty" id="no-boards">ยังไม่ม�
   }
   layout();
   applyFilter();
+  bootBoards();
   loadGroups();
 
 </script>

@@ -21,6 +21,14 @@
  *   - no visible text under 12px on a phone (.meta is 13px)
  *   - thumbnails: first 3 eager/high priority, all lazy below, all sized
  *   - card metadata is Thai and the theme-color meta follows the theme
+ *   - the sticky phone bar is frosted, not see-through, in both themes
+ *   - the card title is a real link and the card controls never navigate
+ *   - one empty state, driven by the boot answer and by the search
+ *   - dialogs trap Tab, make the page behind inert, close on Escape and hand
+ *     focus back to the button that opened them
+ *   - the toast is a polite live region and errors stay up about 4s
+ *   - a failing or short /api/boards answer keeps the built cards and shows a
+ *     retryable banner instead of emptying the grid
  */
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -181,6 +189,16 @@ async function seed(dataDir) {
   }
 }
 
+// A catalogue whose server really holds nothing: the only way to see the
+// zero-board empty state instead of the zero-match one.
+async function seedEmpty(dataDir) {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(
+    path.join(dataDir, ".groups.json"),
+    JSON.stringify({ version: 1, groups: [] }, null, 2),
+  );
+}
+
 async function buildSite(dataDir, siteDir) {
   await mkdir(siteDir, { recursive: true });
   const result = await run(process.execPath, [BUILD], {
@@ -196,7 +214,9 @@ async function buildSite(dataDir, siteDir) {
 // Stub server: static catalogue + the two API answers the page asks for.
 // ---------------------------------------------------------------------------
 
-function serve(siteDir, dataDir, port) {
+// `state` lets a test flip either API to a failure or to a short answer, which
+// is how the warning banner and the stale-list guard get exercised.
+function serve(siteDir, dataDir, port, state = { boards: "ok", groups: "ok" }) {
   const manifest = JSON.parse(readFileSync(path.join(siteDir, "manifest.json"), "utf8"));
   const groups = JSON.parse(readFileSync(path.join(dataDir, ".groups.json"), "utf8")).groups;
   const counts = new Map();
@@ -216,11 +236,27 @@ function serve(siteDir, dataDir, port) {
     const url = new URL(req.url, "http://localhost");
     const pathname = decodeURIComponent(url.pathname);
     if (pathname === "/api/boards") {
+      if (state.boards === "fail") {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("boom");
+        return;
+      }
+      const boards =
+        state.boards === "empty"
+          ? []
+          : state.boards === "one-less"
+            ? manifest.boards.slice(1)
+            : manifest.boards;
       res.writeHead(200, { "content-type": types[".json"] });
-      res.end(JSON.stringify({ boards: manifest.boards }));
+      res.end(JSON.stringify({ boards }));
       return;
     }
     if (pathname === "/api/groups") {
+      if (state.groups === "fail") {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("boom");
+        return;
+      }
       res.writeHead(200, { "content-type": types[".json"] });
       res.end(
         JSON.stringify({
@@ -275,6 +311,11 @@ async function launchChrome(port, profileDir) {
       "--hide-scrollbars",
       "--disable-extensions",
       "--disable-dev-shm-usage",
+      // keep the page's own timers honest: a backgrounded renderer throttles
+      // setTimeout to 1s buckets, which would make a 120ms debounce look dead
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
       "--window-size=1400,900",
       "about:blank",
     ],
@@ -342,8 +383,10 @@ async function newPage(cdp, url) {
     async goto(address) {
       await send("Page.navigate", { url: address });
       for (let i = 0; i < 100; i += 1) {
+        // A page may legitimately have no cards (empty catalogue), so readiness
+        // is judged on the header instead of on a card.
         const ready = await page
-          .eval('document.readyState === "complete" && document.querySelectorAll(".card").length > 0')
+          .eval('document.readyState === "complete" && !!document.querySelector("header")')
           .catch(() => false);
         if (ready) break;
         await sleep(100);
@@ -377,6 +420,19 @@ async function newPage(cdp, url) {
       await send("Emulation.setEmulatedMedia", {
         features: [{ name: "prefers-color-scheme", value: scheme }],
       });
+    },
+    async key(name, options = {}) {
+      const codes = { Tab: 9, Escape: 27, Enter: 13, " ": 32 };
+      const base = {
+        key: name,
+        code: name === " " ? "Space" : name,
+        windowsVirtualKeyCode: codes[name] || 0,
+        nativeVirtualKeyCode: codes[name] || 0,
+        modifiers: options.shift ? 8 : 0,
+      };
+      await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+      await sleep(80);
     },
     async scrollTo(y) {
       await page.eval(`window.scrollTo(0, ${Math.max(0, Math.round(y))})`);
@@ -581,6 +637,116 @@ const ROW = `(() => {
     card: b(".card"),
     h1: b("header h1"),
     groupChips: [...document.querySelectorAll("#group-chips .chip")].map((el) => el.textContent.trim()),
+  };
+})()`;
+
+const ALPHA = `(() => {
+  const parseColour = (text) => {
+    const match = text && text.match(/rgba?\\(([^)]+)\\)/);
+    if (!match) return null;
+    const parts = match[1].split(",").map((value) => parseFloat(value));
+    return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const style = getComputedStyle(document.querySelector(".top"));
+  const stops = [...style.backgroundImage.matchAll(/rgba?\\([^)]+\\)/g)]
+    .map((match) => parseColour(match[0]))
+    .filter(Boolean);
+  return {
+    stops: stops.map((stop) => stop.a),
+    min: stops.length ? Math.min(...stops.map((stop) => stop.a)) : null,
+    field: parseColour(getComputedStyle(document.querySelector("#q")).backgroundColor),
+    blur: style.backdropFilter || style.webkitBackdropFilter || "none",
+  };
+})()`;
+
+const CARDCOUNT = `[...document.querySelectorAll(".card")].filter((card) => !card.hidden && card.getClientRects().length > 0).length`;
+
+const LINKS = `(() => {
+  const cards = [...document.querySelectorAll(".card")];
+  const first = cards[0];
+  if (!first) return { cards: 0 };
+  const title = first.querySelector("h2 a.title-link");
+  const shot = first.querySelector("a.shot");
+  return {
+    cards: cards.length,
+    tag: title ? title.tagName : null,
+    href: title ? title.getAttribute("href") : null,
+    shotHref: shot ? shot.getAttribute("href") : null,
+    slug: first.dataset.slug,
+    h2: first.querySelector("h2") ? first.querySelector("h2").textContent.trim() : "",
+    titleText: title ? title.textContent.trim() : "",
+    nestedAnchors: first.querySelectorAll("a a").length,
+    controls: [...first.querySelectorAll(".rename, .del, button.card-group")].map((el) => ({
+      cls: el.className,
+      nested: !!el.closest("a"),
+    })),
+  };
+})()`;
+
+const EMPTY = `(() => {
+  const el = document.getElementById("empty");
+  return {
+    present: !!el,
+    text: el ? el.textContent : "",
+    hidden: el ? el.hidden : null,
+    visible: !!(el && !el.hidden && el.getClientRects().length > 0),
+    legacy: document.querySelectorAll("#no-boards").length,
+    empties: document.querySelectorAll(".empty").length,
+    cards: [...document.querySelectorAll(".card")].filter((card) => !card.hidden && card.getClientRects().length > 0).length,
+  };
+})()`;
+
+const MODAL = `(() => {
+  const open = [...document.querySelectorAll(".modal")].filter((modal) => !modal.hidden);
+  const behind = [...document.body.children]
+    .filter((el) => el.tagName !== "SCRIPT" && !el.classList.contains("modal"))
+    .map((el) => ({ id: el.id || el.tagName, inert: !!el.inert }));
+  const active = document.activeElement;
+  return {
+    open: open.map((modal) => modal.id),
+    behind,
+    active: active ? active.id || active.className || active.tagName : "",
+    activeInside: !!(active && active.closest(".modal-card")),
+    cardTabIndex: open[0] ? open[0].querySelector(".modal-card").getAttribute("tabindex") : null,
+  };
+})()`;
+
+const DELDETAIL = `(() => {
+  const detail = document.getElementById("del-detail");
+  const name = detail.querySelector(".del-name");
+  const file = detail.querySelector(".del-file");
+  const card = document.querySelector(".card");
+  return {
+    name: name.textContent,
+    file: file.textContent,
+    order: [...detail.children].map((el) => el.className),
+    nameColour: getComputedStyle(name).color,
+    fileColour: getComputedStyle(file).color,
+    nameSize: parseFloat(getComputedStyle(name).fontSize),
+    title: card ? card.querySelector("h2").textContent.trim() : "",
+  };
+})()`;
+
+const BANNER = `(() => {
+  const el = document.getElementById("server-banner");
+  return {
+    present: !!el,
+    visible: !!(el && !el.hidden && el.getClientRects().length > 0),
+    role: el ? el.getAttribute("role") : null,
+    text: el ? el.querySelector(".banner-text").textContent : "",
+    retry: el ? el.querySelector(".banner-retry").textContent.trim() : "",
+    cards: [...document.querySelectorAll(".card")].filter((card) => !card.hidden && card.getClientRects().length > 0).length,
+  };
+})()`;
+
+const TOAST = `(() => {
+  const el = document.getElementById("toast");
+  return {
+    role: el.getAttribute("role"),
+    live: el.getAttribute("aria-live"),
+    hidden: el.hidden,
+    visible: !el.hidden && el.getClientRects().length > 0,
+    text: el.textContent,
   };
 })()`;
 
@@ -841,6 +1007,345 @@ async function measureThemeColor(page, theme) {
   }
 }
 
+async function measureFrost(page, width) {
+  // Only the phone layout floats the bar over cards; the desktop bar sits in
+  // the flow above the grid.
+  if (width > 640) return;
+  const frost = await page.eval(ALPHA);
+  check(
+    frost.stops.length > 0 && frost.min >= 0.82,
+    "phone: the sticky bar is opaque enough to read over a card",
+    `min alpha ${frost.min}`,
+  );
+  check(
+    !!frost.field && frost.field.a >= 0.82,
+    "phone: the search field has its own fill",
+    frost.field ? `alpha ${frost.field.a}` : "no fill",
+  );
+  check(/blur/.test(frost.blur), "phone: the sticky bar keeps its blur", frost.blur);
+}
+
+async function setSearch(page, text) {
+  await page.eval(`(() => {
+    const input = document.querySelector("#q");
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, ${JSON.stringify(text)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+}
+
+// one input event per character, so the debounce sees a real typing burst
+async function typeSearch(page, text) {
+  for (const char of text) {
+    await page.eval(`(() => {
+      const input = document.querySelector("#q");
+      input.value += ${JSON.stringify(char)};
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+  }
+}
+
+async function measureLinks(page, base) {
+  const links = await page.eval(LINKS);
+  check(links.cards > 0, "cards render before the link checks", `${links.cards}`);
+  check(
+    links.tag === "A" && links.href === "/b/" + links.slug && links.href === links.shotHref,
+    "the card title is a link to the board, like the preview",
+    `${links.tag} ${links.href}`,
+  );
+  check(links.h2 === links.titleText, "the whole title sits inside the link", links.h2);
+  check(links.nestedAnchors === 0, "no link is nested inside another link");
+  check(
+    links.controls.every((control) => !control.nested),
+    "rename, delete and group controls are outside the link",
+    links.controls.map((control) => control.cls).join(" | "),
+  );
+
+  // Opening the rename dialog must not navigate.
+  await page.eval('document.querySelector(".card .rename").click()');
+  await sleep(150);
+  const rename = await page.eval(
+    '({ path: location.pathname, open: !document.getElementById("rename-modal").hidden })',
+  );
+  check(rename.open && rename.path === "/", "rename opens its dialog without navigating", rename.path);
+  await page.key("Escape");
+  await sleep(150);
+
+  // The title has to be a real link, not decoration.
+  const target = links.href;
+  await page.eval('document.querySelector(".card h2 a.title-link").click()');
+  await sleep(400);
+  const landed = await page.eval("location.pathname");
+  check(landed === target, "clicking the title navigates to the board", landed);
+  await page.goto(base);
+}
+
+async function measureEmpty(page) {
+  const idle = await page.eval(EMPTY);
+  check(
+    idle.present && idle.empties === 1 && idle.legacy === 0,
+    "exactly one empty state exists",
+    `${idle.empties} .empty · ${idle.legacy} #no-boards`,
+  );
+  check(
+    idle.hidden && !idle.visible && idle.cards > 0,
+    "no empty state while cards are visible",
+    `${idle.cards} card(s)`,
+  );
+
+  await setSearch(page, "");
+  await typeSearch(page, "zzz");
+  const typing = await page.eval(CARDCOUNT);
+  check(
+    typing === idle.cards,
+    "a typing burst does not filter between keystrokes",
+    `${typing}/${idle.cards} still visible`,
+  );
+  await sleep(260);
+  const settled = await page.eval(CARDCOUNT);
+  check(settled === 0, "the filter runs once typing pauses", `${settled} card(s)`);
+
+  const none = await page.eval(EMPTY);
+  check(
+    none.visible && !none.hidden && none.cards === 0 && /ไม่พบกระดาน/.test(none.text),
+    "zero matches: one note explains the search",
+    none.text,
+  );
+
+  await setSearch(page, "");
+  await sleep(260);
+  const cleared = await page.eval(EMPTY);
+  check(
+    cleared.hidden && !cleared.visible && cleared.cards === idle.cards,
+    "clearing the search brings every card back",
+    `${cleared.cards} card(s)`,
+  );
+}
+
+async function measureModals(page) {
+  const before = await page.eval("location.pathname");
+  await page.eval('document.querySelector(".card .del").click()');
+  await sleep(180);
+  const opened = await page.eval(MODAL);
+  const afterDel = await page.eval("location.pathname");
+  check(
+    before === afterDel,
+    "the delete control opens the dialog without leaving the page",
+    afterDel,
+  );
+  const detail = await page.eval(DELDETAIL);
+  check(
+    opened.open.length === 1 && opened.open[0] === "del-modal",
+    "the delete dialog opens alone",
+    opened.open.join(",") || "none",
+  );
+  check(
+    opened.behind.every((el) => el.id === "toast" || el.inert),
+    "everything behind the dialog is inert",
+    opened.behind.map((el) => `${el.id}:${el.inert}`).join(" "),
+  );
+  check(opened.activeInside, "focus moves into the dialog", opened.active);
+  check(opened.cardTabIndex === "-1", "the dialog card can take focus as a fallback", opened.cardTabIndex);
+  check(
+    detail.name.length > 0 && detail.name === detail.title,
+    "the confirmation names the board first",
+    detail.name,
+  );
+  check(detail.file.includes(".excalidraw"), "the file id stays in the confirmation", detail.file.slice(0, 48));
+  check(
+    detail.order[0].includes("del-name") && detail.order[1].includes("del-file"),
+    "the title line comes before the file line",
+    detail.order.join(" → "),
+  );
+  check(
+    detail.nameSize >= 12 && detail.fileColour !== detail.nameColour,
+    "the file id is muted next to the title",
+    `${detail.nameColour} vs ${detail.fileColour}`,
+  );
+
+  await page.key("Tab");
+  const wrapped = await page.eval("document.activeElement.id || document.activeElement.className");
+  check(wrapped === "del-cancel", "Tab from the last control wraps to the first", wrapped);
+  await page.key("Tab", { shift: true });
+  const back = await page.eval("document.activeElement.id || document.activeElement.className");
+  check(back === "del-hold", "Shift+Tab from the first control wraps to the last", back);
+
+  await page.key("Escape");
+  await sleep(180);
+  const closed = await page.eval(MODAL);
+  const focused = await page.eval(
+    'document.activeElement ? document.activeElement.className || document.activeElement.id : ""',
+  );
+  check(closed.open.length === 0, "Escape closes the dialog");
+  check(
+    closed.behind.every((el) => !el.inert),
+    "the page is interactive again",
+    closed.behind.map((el) => `${el.id}:${el.inert}`).join(" "),
+  );
+  check(/del/.test(focused) && !/modal/.test(focused), "focus returns to the button that opened it", focused);
+
+  // The rename form gets the same trap from the shared code.
+  await page.eval('document.querySelector(".card .rename").click()');
+  await sleep(180);
+  const rename = await page.eval(MODAL);
+  check(
+    rename.open[0] === "rename-modal" &&
+      rename.behind.every((el) => el.id === "toast" || el.inert),
+    "the rename form takes the same trap",
+    rename.open.join(",") || "none",
+  );
+  await page.key("Escape");
+  await sleep(150);
+  const renameClosed = await page.eval(MODAL);
+  check(
+    renameClosed.open.length === 0 && renameClosed.behind.every((el) => !el.inert),
+    "Escape closes the rename form",
+  );
+}
+
+async function measureToast(page, timing) {
+  const attrs = await page.eval(TOAST);
+  check(
+    attrs.role === "status" && attrs.live === "polite",
+    "the toast is a polite live region",
+    `${attrs.role}/${attrs.live}`,
+  );
+  check(!attrs.visible, "the toast starts hidden");
+
+  // A group tick PATCHes membership; the stub answers 404, which is exactly the
+  // error path that has to stay readable.
+  await page.eval('document.querySelector(".card .card-group").click()');
+  await sleep(180);
+  const menu = await page.eval('!!document.querySelector(".card .group-menu input[type=checkbox]")');
+  check(menu, "the group menu opens for the toast test");
+  if (!menu) return;
+  await page.eval('document.querySelector(".card .group-menu input[type=checkbox]").click()');
+  let seen = null;
+  for (let i = 0; i < 30 && !seen; i += 1) {
+    const state = await page.eval(TOAST);
+    if (state.visible) seen = state;
+    else await sleep(100);
+  }
+  check(
+    !!seen && /ไม่พบหมวด/.test(seen.text),
+    "a failed save shows the 404 error toast",
+    seen ? seen.text : "no toast",
+  );
+  if (!seen || !timing) return;
+  const start = Date.now();
+  const timeline = [];
+  for (let elapsed = 0; elapsed <= 6000; elapsed += 500) {
+    await sleep(Math.max(0, start + elapsed - Date.now()));
+    const now = await page.eval(TOAST);
+    timeline.push(`${Math.round((Date.now() - start) / 100) / 10}s:${now.visible ? "on" : "off"}${now.text ? "/" + now.text.length : ""}`);
+  }
+  const at3 = timeline.find((entry) => entry.startsWith("3.0s") || entry.startsWith("3s"));
+  check(/on/.test(at3 || ""), "the error toast is still up after 3s", at3);
+  const at5 = timeline.find((entry) => entry.startsWith("5.0s") || entry.startsWith("5s"));
+  check(/off/.test(at5 || ""), "the error toast clears after about 4s", at5);
+}
+
+async function measureBanners(page, base, state) {
+  state.boards = "fail";
+  await page.goto(base);
+  const down = await page.eval(BANNER);
+  check(
+    down.present && down.visible && /เชื่อมต่อเซิร์ฟเวอร์ไม่ได้/.test(down.text),
+    "boards API down: a Thai banner explains",
+    down.text.slice(0, 44),
+  );
+  check(down.cards > 0, "boards API down: the built cards stay", `${down.cards} card(s)`);
+  check(
+    down.role === "alert" && down.retry.length > 0,
+    "the banner is an alert with a retry button",
+    down.retry,
+  );
+  state.boards = "ok";
+  await page.eval('document.querySelector("#server-banner .banner-retry").click()');
+  await sleep(700);
+  const back = await page.eval(BANNER);
+  check(!back.visible && back.cards === down.cards, "retry clears the banner once the API answers", `${back.cards} card(s)`);
+
+  // An empty answer while the page shows cards is stale, not a wipe.
+  state.boards = "empty";
+  await page.goto(base);
+  const stale = await page.eval(BANNER);
+  check(
+    stale.visible && /ไม่ได้ส่งรายการกระดาน/.test(stale.text),
+    "an empty answer is announced instead of trusted",
+    stale.text.slice(0, 44),
+  );
+  check(
+    stale.cards === down.cards,
+    "an empty answer does not prune the built cards",
+    `${stale.cards} vs ${down.cards}`,
+  );
+  state.boards = "ok";
+  await page.eval('document.querySelector("#server-banner .banner-retry").click()');
+  await sleep(700);
+  const fixed = await page.eval(BANNER);
+  check(!fixed.visible && fixed.cards === stale.cards, "retry restores the full list", `${fixed.cards} card(s)`);
+
+  // One board short is a real deletion: trust it, prune that card, no banner.
+  const gone = await page.eval('document.querySelector(".card").dataset.slug');
+  state.boards = "one-less";
+  await page.goto(base);
+  const short = await page.eval(BANNER);
+  const slugs = await page.eval('[...document.querySelectorAll(".card")].map((card) => card.dataset.slug)');
+  check(!short.visible, "a one-board-short answer is not called stale");
+  check(
+    !slugs.includes(gone) && short.cards === down.cards - 1,
+    "a board deleted elsewhere loses its card, the rest stay",
+    `${gone} gone, ${short.cards} left`,
+  );
+  state.boards = "ok";
+  await page.goto(base);
+  const restored = await page.eval(BANNER);
+  check(!restored.visible, "the next full answer stays quiet");
+
+  state.groups = "fail";
+  await page.goto(base);
+  const noGroups = await page.eval(BANNER);
+  check(noGroups.visible && /หมวด/.test(noGroups.text), "groups API down: the banner says so", noGroups.text.slice(0, 44));
+  const chips = await page.eval('document.querySelectorAll("#group-chips .chip[data-group]:not([data-group=all])").length');
+  check(chips === 0, "groups API down: no chip is invented", `${chips} chip(s)`);
+  state.groups = "ok";
+  await page.eval('document.querySelector("#server-banner .banner-retry").click()');
+  await sleep(700);
+  const groupsBack = await page.eval(
+    '({ visible: !document.getElementById("server-banner").hidden, chips: document.querySelectorAll("#group-chips .chip[data-group]:not([data-group=all])").length })',
+  );
+  check(!groupsBack.visible && groupsBack.chips > 0, "retry brings the group chips back", `${groupsBack.chips} chip(s)`);
+
+  state.boards = "fail";
+  await page.goto(base);
+  await page.eval('document.querySelector("#server-banner .banner-close").click()');
+  await sleep(180);
+  const dismissed = await page.eval(BANNER);
+  check(!dismissed.visible, "the close button dismisses the banner");
+  state.boards = "ok";
+  await page.goto(base);
+}
+
+async function measureZeroBoards(page, emptyBase, base) {
+  await page.goto(emptyBase);
+  const empty = await page.eval(EMPTY);
+  check(empty.cards === 0, "a zero-board catalogue renders no card", `${empty.cards} card(s)`);
+  check(
+    empty.present && empty.empties === 1 && empty.legacy === 0,
+    "zero boards: still one empty state",
+    `${empty.empties} .empty · ${empty.legacy} #no-boards`,
+  );
+  check(
+    empty.visible && /ยังไม่มีกระดาน/.test(empty.text),
+    "zero boards: the note says the server has none",
+    empty.text,
+  );
+  const banner = await page.eval(BANNER);
+  check(!banner.visible, "zero boards is not an error: no banner", banner.text);
+  await page.goto(base);
+}
+
 // ---------------------------------------------------------------------------
 
 async function openThemed(page, base, theme) {
@@ -857,14 +1362,21 @@ async function main() {
   await rm(TMP_ROOT, { recursive: true, force: true });
   const dataDir = path.join(TMP_ROOT, "data");
   const siteDir = path.join(TMP_ROOT, "site");
+  const emptyData = path.join(TMP_ROOT, "empty-data");
+  const emptySite = path.join(TMP_ROOT, "empty-site");
   await seed(dataDir);
-  console.log(`building catalogue from ${BOARDS.length} throwaway boards…`);
+  await seedEmpty(emptyData);
+  console.log(`building catalogues from throwaway boards…`);
   await buildSite(dataDir, siteDir);
+  await buildSite(emptyData, emptySite);
 
-  const [httpPort, debugPort] = await freePorts(2);
-  const server = await serve(siteDir, dataDir, httpPort);
+  const state = { boards: "ok", groups: "ok" };
+  const [httpPort, debugPort, emptyPort] = await freePorts(3);
+  const server = await serve(siteDir, dataDir, httpPort, state);
+  const emptyServer = await serve(emptySite, emptyData, emptyPort);
   const cdp = await launchChrome(debugPort, path.join(TMP_ROOT, "chrome"));
   const base = `http://127.0.0.1:${httpPort}/`;
+  const emptyBase = `http://127.0.0.1:${emptyPort}/`;
   const summary = {};
 
   try {
@@ -881,22 +1393,37 @@ async function main() {
     await measureContrast(page);
     await measureThumbs(page);
     await measureMeta(page);
+    await measureFrost(page, 393);
     const lightShot = await page.shot("gallery-393-light");
     await page.scrollTo(260);
     const scrolledShot = await page.shot("gallery-393-light-scrolled");
     await page.scrollTo(0);
+    await measureLinks(page, base);
+    await measureModals(page);
+    await measureToast(page, true);
+    await measureEmpty(page);
+    await measureBanners(page, base, state);
+    await measureZeroBoards(page, emptyBase, base);
 
     console.log("\n393x852, dark");
+    await page.goto(base);
     await page.eval('document.querySelector("#theme-toggle").click()');
     await sleep(200);
     await measureThemeColor(page, "dark");
     await measureContrast(page);
     await measureSticky(page, 393);
+    await measureFrost(page, 393);
     const darkShot = await page.shot("gallery-393-dark");
+    await page.scrollTo(260);
+    const darkScrolled = await page.shot("gallery-393-dark-scrolled");
+    await page.scrollTo(0);
+    await measureModals(page);
+    await measureToast(page, false);
+    await measureLinks(page, base);
     // The pre-paint script must put the dark theme-color back on a reload.
     await page.goto(base);
     await measureThemeColor(page, "dark");
-    summary.phone = { lightShot, scrolledShot, darkShot };
+    summary.phone = { lightShot, scrolledShot, darkShot, darkScrolled };
     await page.close();
 
     // -------------------------------------------------------- desktop ------
@@ -908,6 +1435,13 @@ async function main() {
     await measureSticky(page, 1400);
     await measureRows(page, 1400);
     await measureContrast(page);
+    await measureFrost(page, 1400);
+    await measureLinks(page, base);
+    await measureModals(page);
+    await measureToast(page, false);
+    await measureEmpty(page);
+    await measureBanners(page, base, state);
+    await measureZeroBoards(page, emptyBase, base);
     const desktopLight = await page.shot("gallery-1400-light");
 
     console.log("\n1400x900, dark");
@@ -915,12 +1449,14 @@ async function main() {
     await sleep(200);
     await measureThemeColor(page, "dark");
     await measureContrast(page);
+    await measureModals(page);
     const desktopDark = await page.shot("gallery-1400-dark");
     summary.desktop = { desktopLight, desktopDark };
     await page.close();
   } finally {
     cdp.close();
     await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => emptyServer.close(resolve));
   }
 
   console.log(
