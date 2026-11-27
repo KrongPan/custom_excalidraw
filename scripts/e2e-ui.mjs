@@ -6,10 +6,15 @@
  *   node scripts/e2e-ui.mjs [baseUrl]
  * default baseUrl: http://127.0.0.1:5792
  *
+ * The suite writes boards and groups, so the server it talks to must run on a
+ * throwaway DATA_DIR (`DATA_DIR=$(mktemp -d)`). Refused otherwise unless
+ * E2E_ALLOW_REAL_DATA=1 is set; groups are dropped in a finally block and on
+ * SIGINT/SIGTERM so an interrupted run leaves nothing behind.
+ *
  * Exits non-zero on the first failing assertion group and prints every failure.
  */
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -322,6 +327,69 @@ async function deleteBoard(id) {
   }
 }
 
+/* A killed run used to leave its `e2e-a-`/`e2e-b-` groups in the live
+ * catalogue. They are dropped here, from the finally block and from the signal
+ * handlers, so no exit path keeps them. */
+async function dropGroups() {
+  for (const id of groupsToDrop.splice(0)) {
+    await api(`/api/groups/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+  }
+}
+
+/*
+ * This suite creates and deletes boards, groups and metadata. Against the real
+ * store a crashed run leaves junk behind (or, worse, cleanup deletes a group
+ * somebody made), so only a DATA_DIR under a temp root is accepted. The server
+ * reports its own DATA_DIR, which is the only reliable answer for a base URL
+ * that may be a container.
+ *
+ * Symlinks are resolved first: on macOS `/tmp` is `/private/tmp` while
+ * os.tmpdir() is a per-user `/var/folders/…`, and both are temp dirs.
+ */
+async function assertThrowawayDataDir() {
+  const health = await api("/api/health").catch(() => null);
+  const dataDir = health?.body?.dataDir;
+  if (!dataDir) {
+    console.error(`e2e: ${BASE}/api/health did not report a DATA_DIR — is the server running?`);
+    process.exit(2);
+  }
+  const canonical = async (target) => realpath(target).catch(() => path.resolve(target));
+  const resolved = await canonical(String(dataDir));
+  const roots = await Promise.all([os.tmpdir(), "/tmp", process.env.TMPDIR].filter(Boolean).map(canonical));
+  if (!roots.some((root) => resolved !== root && resolved.startsWith(root + path.sep))) {
+    if (process.env.E2E_ALLOW_REAL_DATA !== "1") {
+      console.error(
+        `e2e: refusing to run against DATA_DIR ${resolved} (not under ${roots.join(" or ")}).\n` +
+          "e2e: start the server with a throwaway dir, e.g. DATA_DIR=$(mktemp -d), " +
+          "or set E2E_ALLOW_REAL_DATA=1 to run against the real store anyway.",
+      );
+      process.exit(2);
+    }
+    console.error(`e2e: WARNING running against the real data dir ${resolved} (E2E_ALLOW_REAL_DATA=1)`);
+  }
+}
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n${signal} — dropping e2e test data before exit`);
+  await dropGroups().catch(() => {});
+  try {
+    cdp?.ws.close();
+  } catch {
+    /* already closed */
+  }
+  try {
+    browser?.kill("SIGTERM");
+  } catch {
+    /* already gone */
+  }
+  process.exit(130);
+}
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
 function metaTitle(id) {
   return api(`/api/boards/${encodeURIComponent(id)}/meta`).then((r) => r.body?.title);
 }
@@ -393,6 +461,7 @@ async function openEditor(boardId = BOARD) {
 }
 
 (async () => {
+  await assertThrowawayDataDir();
   const port = await freePort();
   const profile = await mkdtemp(path.join(os.tmpdir(), "dsh-e2e-chrome-"));
   browser = spawn(
@@ -2164,7 +2233,14 @@ async function openEditor(boardId = BOARD) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: `e2e-b-${groupTag}`, color: "teal" }),
     })).body.group;
-    groupsToDrop.push(groupOne.id, groupTwo.id);
+    // a third group stays unfiled: the popover must draw it as an unticked row,
+    // and a throwaway store has no other group to supply one
+    const groupSpare = (await api("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `e2e-c-${groupTag}`, color: "amber" }),
+    })).body.group;
+    groupsToDrop.push(groupOne.id, groupTwo.id, groupSpare.id);
     const filed = await api(`/api/boards/${encodeURIComponent(BOARD)}/meta`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -2224,7 +2300,8 @@ async function openEditor(boardId = BOARD) {
       "the menu lists every group with the current ticks",
       menu.boxes.some((b) => b.id === groupOne.id && b.checked) &&
         menu.boxes.some((b) => b.id === groupTwo.id && b.checked) &&
-        menu.boxes.some((b) => !b.checked),
+        menu.boxes.some((b) => b.id === groupSpare.id && !b.checked) &&
+        menu.boxes.filter((b) => !b.checked).length === 1,
       JSON.stringify(menu),
     );
     await cdp.evaluate(`(() => {
@@ -2249,9 +2326,7 @@ async function openEditor(boardId = BOARD) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ groupIds: [] }),
     });
-    await api(`/api/groups/${encodeURIComponent(groupOne.id)}`, { method: "DELETE" });
-    await api(`/api/groups/${encodeURIComponent(groupTwo.id)}`, { method: "DELETE" });
-    groupsToDrop = [];
+    await dropGroups();
 
     await cdp.viewport(393, 852, true);
     await cdp.navigate(`${BASE}/`);
@@ -2610,6 +2685,7 @@ async function openEditor(boardId = BOARD) {
   } catch (error) {
     check("e2e harness completed", false, error.stack || error.message);
   } finally {
+    await dropGroups().catch(() => {});
     try {
       await deleteBoard(BOARD);
       await deleteBoard("e2e-rel-probe");

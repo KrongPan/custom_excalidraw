@@ -18,8 +18,19 @@ COPY app/public ./public
 COPY app/src ./src
 RUN npm run build
 
+# write .br/.gz next to every text asset now, so the runtime never brotli-
+# compresses the 1.5MB entry bundle on a request
+COPY app/server.mjs ./server.mjs
+RUN node server.mjs --precompress dist
+
 # ---- runtime -----------------------------------------------------------------
 FROM node:24-bookworm-slim
+
+# stamped by `docker compose build --build-arg BUILD_COMMIT=$(git rev-parse
+# --short HEAD) --build-arg BUILD_DATE=$(date -u +%F)`; /api/health reports them
+# so a container serving an old build is visible instead of guessed at
+ARG BUILD_COMMIT=dev
+ARG BUILD_DATE=dev
 
 ENV NODE_ENV=production \
     PORT=5002 \
@@ -27,7 +38,9 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     GALLERY_DIR=/gallery \
     GALLERY_BUILD=/srv/tools/build.mjs \
-    LOGO_DIR=/srv/assets/logo
+    LOGO_DIR=/srv/assets/logo \
+    BUILD_COMMIT=${BUILD_COMMIT} \
+    BUILD_DATE=${BUILD_DATE}
 
 WORKDIR /srv
 COPY app/server.mjs ./
