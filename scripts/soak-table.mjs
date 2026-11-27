@@ -1200,23 +1200,46 @@ class Page {
   async hoverLine(gridId, axis, at) {
     const box = await this.focusTrack(gridId, axis, at);
     const index = Math.max(0, Math.min(at, axis === "row" ? box.rowBottoms.length : box.colRights.length) - 1);
-    const x = Math.max(40, Math.min(axis === "row" ? box.left + 24 : box.colRights[index], 1200));
-    const y = Math.max(80, axis === "row" ? box.rowBottoms[index] : box.top + 24);
+    const host = await this.cdp.evaluate(`(() => {
+      const r = document.querySelector(".canvas").getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    })()`);
+    // the point must lie beside the line *and* inside the grid's span, so aim
+    // down the middle of the part of the table the canvas actually shows
+    const visLeft = Math.max(box.left, host.left + 8);
+    const visRight = Math.min(box.right, host.right - 8);
+    const visTop = Math.max(box.top, host.top + 8);
+    const visBottom = Math.min(box.bottom, host.bottom - 8);
+    // aim inside the first track, never at its middle line: a point exactly on
+    // a crossing counts as a row line, so a column insert would add a row
+    const rowH = (box.bottom - box.top) / Math.max(1, box.rows);
+    const colW = (box.right - box.left) / Math.max(1, box.cols);
+    const x = axis === "row" ? Math.min(visRight - 2, box.left + colW / 2) : box.colRights[index];
+    const y =
+      axis === "row"
+        ? box.rowBottoms[index]
+        : Math.min(visBottom - 2, Math.max(visTop + 2, visTop + rowH / 2));
+    this.lastHover = { x, y, host, box: { left: box.left, top: box.top, right: box.right, bottom: box.bottom, rows: box.rows, cols: box.cols } };
     await this.cdp.mouse("mouseMoved", x, y);
     await sleep(140);
     return box;
   }
 
-  /** Hover a cell of the track the removal should drop. */
+  /**
+   * Hover the outer border level with the track the removal should drop: the
+   * left border drops a row, the top border drops a column.
+   */
   async hoverTrack(gridId, axis, index) {
-    const box = await this.focusTrack(gridId, axis, index + 1);
+    await this.focusTrack(gridId, axis, index + 1);
+    const box = await this.tableBox(gridId);
     const count = axis === "row" ? box.rows : box.cols;
-    const last = Math.max(0, count - 1);
-    const at = Math.max(0, Math.min(index, last));
-    const p = await this.cellPoint(gridId, axis === "row" ? at : 0, axis === "row" ? 0 : at);
-    await this.cdp.mouse("mouseMoved", p.x, p.y);
-    await sleep(120);
-    return box;
+    const at = Math.max(0, Math.min(index, Math.max(0, count - 1)));
+    const cell = await this.cellPoint(gridId, axis === "row" ? at : 0, axis === "row" ? 0 : at);
+    const x = axis === "row" ? box.left : cell.x;
+    const y = axis === "row" ? cell.y : box.top;
+    await this.cdp.mouse("mouseMoved", x, y);
+    await sleep(160);
+    return { ...box, at };
   }
 
   async grow(axis) {
@@ -1238,6 +1261,7 @@ class Page {
             axis: el.dataset.axis, at: el.dataset.at, opacity: getComputedStyle(el).opacity,
           })),
           pointer: window.__soakPointer || null,
+          hover: ${JSON.stringify(this.lastHover ?? null)},
         };
       })()`);
       throw new Fail("ui-missing", `${axis} insert pill never showed: ${JSON.stringify(diag)}`);
@@ -1463,7 +1487,12 @@ class Soak {
 
   async ensureSelected() {
     let grid = await this.page.selectedGrid();
-    if (grid) return grid;
+    if (grid) {
+      // an undo can take the table away while the board still points at it
+      const now = await this.live();
+      if (liveCells(now, grid).length) return grid;
+      grid = null;
+    }
     let elements = await this.live();
     if (!gridIds(elements).length) {
       // an undo can take the last table off the board (that is a legitimate

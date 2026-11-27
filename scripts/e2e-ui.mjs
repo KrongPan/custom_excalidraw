@@ -770,8 +770,9 @@ async function openEditor(boardId = BOARD) {
           arrows: els.filter((el) => el.type === "arrow").length,
         };
       })()`);
-    // hover the middle of a grid: bounds come from its cells, because a plain
-    // table only gets a frame element once a relation needs one
+    // hover the top edge of a grid: bounds come from its cells, because a plain
+    // table only gets a frame element once a relation needs one. The edge is a
+    // line, so a pill shows up there (the middle of a table is a bare cell).
     const hoverFrame = async (gridId) => {
       const centre = () =>
         cdp.evaluate(`(() => {
@@ -784,10 +785,9 @@ async function openEditor(boardId = BOARD) {
           const left = Math.min(...els.map((el) => el.x));
           const top = Math.min(...els.map((el) => el.y));
           const right = Math.max(...els.map((el) => el.x + el.width));
-          const bottom = Math.max(...els.map((el) => el.y + el.height));
           return {
             x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
-            y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
+            y: host.top + (top + (s.scrollY || 0)) * zoom,
           };
         })()`);
       await cdp.evaluate(`(() => {
@@ -969,55 +969,33 @@ async function openEditor(boardId = BOARD) {
       await moveTo(p.x, p.y);
       return gridGeom();
     };
-    /* a class has no r/c cells: nudge the pointer off its centre until it lands
-       inside a field line instead of on the boundary between two of them */
-    const hoverIntoCell = async (gridId) => {
-      const centre = () =>
-        cdp.evaluate(`(() => {
-          const api = window.__boardsApi;
-          const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
-          if (!els.length) return null;
-          const s = api.getAppState();
-          const zoom = s.zoom?.value || 1;
-          const host = document.querySelector(".canvas").getBoundingClientRect();
-          const left = Math.min(...els.map((el) => el.x));
-          const top = Math.min(...els.map((el) => el.y));
-          const right = Math.max(...els.map((el) => el.x + el.width));
-          const bottom = Math.max(...els.map((el) => el.y + el.height));
-          return {
-            x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
-            y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
-            height: (bottom - top) * zoom,
-          };
-        })()`);
-      const point = await centre();
-      if (!point) throw new Error(`grid ${gridId} has no elements to hover`);
-      for (const dy of [10, 14, 18, 22, -10, -14]) {
-        await moveTo(point.x, point.y + dy);
-        if (await cdp.evaluate(`Number(getComputedStyle(document.querySelector(".grid-add-row-del")).opacity) > 0.5`)) return;
-      }
-      throw new Error(`could not land inside a cell of ${gridId}`);
+    /* the top border, lined up with one column: the removals live on the border */
+    const hoverTopBorder = async (c) => {
+      const g = await gridGeom();
+      const col = g.cols[c] ?? g.cols[g.cols.length - 1];
+      await moveTo((col.left + col.right) / 2, g.table.top);
+      return g;
+    };
+    /* the left border, lined up with one row */
+    const hoverLeftBorder = async (r) => {
+      const g = await gridGeom();
+      const row = g.rows[r] ?? g.rows[g.rows.length - 1];
+      await moveTo(g.table.left, (row.top + row.bottom) / 2);
+      return g;
     };
 
-    /* a cell offers the two removals, and nothing else */
+    /* nothing rides a cell: both removals used to sit over the cells around it
+       and swallowed the clicks aimed at them */
     await hoverFrame(tableGrid);
-    const cellGeom = await hoverCell(1, 1);
+    await hoverCell(1, 1);
     const cellView = await pills();
     check(
-      "hovering a cell offers the row and column removals",
-      Boolean(cellView.row?.visible && cellView.col?.visible && cellView.insert && !cellView.insert.visible) &&
-        cellView.row.label === "ลบแถวที่ชี้" &&
-        cellView.col.label === "ลบคอลัมน์ที่ชี้",
-      JSON.stringify(cellView),
-    );
-    check(
-      "the removals sit outside the table, clear of every cell",
-      Boolean(cellView.row && cellView.col) &&
-        cellView.row.right <= cellGeom.table.left - 4 &&
-        Math.abs(cellView.row.cy - (cellGeom.rows[1].top + cellGeom.rows[1].bottom) / 2) <= 2 &&
-        cellView.col.bottom <= cellGeom.table.top - 4 &&
-        Math.abs(cellView.col.cx - (cellGeom.cols[1].left + cellGeom.cols[1].right) / 2) <= 2,
-      `row ${JSON.stringify(cellView.row)} col ${JSON.stringify(cellView.col)} table ${JSON.stringify(cellGeom.table)}`,
+      "hovering a cell offers no pill at all",
+      Boolean(cellView.insert && cellView.row && cellView.col) &&
+        !cellView.insert.visible &&
+        !cellView.row.visible &&
+        !cellView.col.visible,
+      JSON.stringify({ insert: cellView.insert?.visible, row: cellView.row?.visible, col: cellView.col?.visible }),
     );
 
     /* a line offers one insert, at that exact boundary */
@@ -1052,6 +1030,42 @@ async function openEditor(boardId = BOARD) {
         Math.abs(colLineView.insert.cx - colLineGeom.cols[1].left) <= 2 &&
         colLineView.insert.bottom <= colLineGeom.table.top - 8,
       `insert ${JSON.stringify(colLineView.insert)} line x ${colLineGeom.cols[1].left} table ${JSON.stringify(colLineGeom.table)}`,
+    );
+
+    /* an outer side border drops the row it is level with, and still carries the
+       insert of the line it happens to be */
+    const sideGeom = await hoverLeftBorder(1);
+    await waitPill(".grid-add-row-del", 1);
+    const sideView = await pills();
+    check(
+      "the left border offers dropping the row beside it",
+      Boolean(sideView.row?.visible) &&
+        sideView.row.at === 1 &&
+        sideView.row.text === "แถว" &&
+        !sideView.col?.visible &&
+        sideView.row.right <= sideGeom.table.left - 4 &&
+        Math.abs(sideView.row.cy - (sideGeom.rows[1].top + sideGeom.rows[1].bottom) / 2) <= 2,
+      `row ${JSON.stringify(sideView.row)} table ${JSON.stringify(sideGeom.table)}`,
+    );
+    check(
+      "that border still offers the insert on the line it carries",
+      Boolean(sideView.insert?.visible) && sideView.insert.axis === "col" && sideView.insert.at === 0,
+      JSON.stringify(sideView.insert),
+    );
+
+    /* the top border drops the column it is level with */
+    const topGeom = await hoverTopBorder(1);
+    await waitPill(".grid-add-col-del", 1);
+    const topView = await pills();
+    check(
+      "the top border offers dropping the column beside it",
+      Boolean(topView.col?.visible) &&
+        topView.col.at === 1 &&
+        topView.col.text === "คอลัมน์" &&
+        !topView.row?.visible &&
+        topView.col.bottom <= topGeom.table.top - 4 &&
+        Math.abs(topView.col.cx - (topGeom.cols[1].left + topGeom.cols[1].right) / 2) <= 2,
+      `col ${JSON.stringify(topView.col)} table ${JSON.stringify(topGeom.table)}`,
     );
 
     /* the first cell gets a word, so an insert above or before it has to carry
@@ -1097,20 +1111,20 @@ async function openEditor(boardId = BOARD) {
       `${JSON.stringify(shape0)} -> ${JSON.stringify(midGrown)} text ${JSON.stringify(afterMid)}`,
     );
 
-    /* drop that same row by pointing at one of its cells */
-    await hoverCell(1, 0);
+    /* drop that same row by pointing at its side border */
+    await hoverLeftBorder(1);
     await waitPill(".grid-add-row-del", 1);
     const dropView = await pills();
     check(
-      "the cell removal names the hovered row",
-      dropView.row.at === 1 && dropView.col.at === 0 && !dropView.insert?.visible,
-      JSON.stringify(dropView),
+      "the side border names the row under the pointer",
+      dropView.row.at === 1 && !dropView.col?.visible,
+      JSON.stringify({ row: dropView.row?.at, col: dropView.col?.visible }),
     );
     await clickPill(".grid-add-row-del");
     await waitRows(rows0);
     const afterDrop = await textCell();
     check(
-      "- on a cell drops exactly that row and keeps the word",
+      "- on the side border drops exactly that row and keeps the word",
       (await gridShape(tableGrid)).rows === rows0 && afterDrop?.r === 0 && afterDrop?.c === 0,
       JSON.stringify(afterDrop),
     );
@@ -1127,14 +1141,14 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(afterTop),
     );
 
-    /* and drop that empty first row from its cell */
-    await hoverCell(0, 0);
+    /* and drop that empty first row from its side border */
+    await hoverLeftBorder(0);
     await waitPill(".grid-add-row-del", 0);
     await clickPill(".grid-add-row-del");
     await waitRows(rows0);
     const afterFrontDrop = await textCell();
     check(
-      "- on the first row's cell drops it and pulls the word back up",
+      "- on the first row's border drops it and pulls the word back up",
       (await gridShape(tableGrid)).rows === rows0 && afterFrontDrop?.r === 0 && afterFrontDrop?.c === 0,
       JSON.stringify(afterFrontDrop),
     );
@@ -1150,13 +1164,13 @@ async function openEditor(boardId = BOARD) {
       (await gridShape(tableGrid)).cols === cols0 + 1 && afterLeftAdd?.r === 0 && afterLeftAdd?.c === 1,
       JSON.stringify(afterLeftAdd),
     );
-    await hoverCell(0, 0);
+    await hoverTopBorder(0);
     await waitPill(".grid-add-col-del", 0);
     await clickPill(".grid-add-col-del");
     await waitCols(cols0);
     const afterLeftDrop = await textCell();
     check(
-      "- on the first column's cell drops it and pulls the word back",
+      "- on the first column's border drops it and pulls the word back",
       (await gridShape(tableGrid)).cols === cols0 && afterLeftDrop?.r === 0 && afterLeftDrop?.c === 0,
       JSON.stringify(afterLeftDrop),
     );
@@ -1172,101 +1186,29 @@ async function openEditor(boardId = BOARD) {
       (await gridShape(tableGrid)).cols === cols0 + 1 && afterMidCol?.r === 0 && afterMidCol?.c === 0,
       JSON.stringify(afterMidCol),
     );
-    await hoverCell(0, 2); // the column inserted at boundary 2 now sits there
+    await hoverTopBorder(2); // the column inserted at boundary 2 now sits there
     await waitPill(".grid-add-col-del", 2);
     await clickPill(".grid-add-col-del");
     await waitCols(cols0);
     const backToStart = await gridShape(tableGrid);
     check(
-      "- on the inserted column's cell returns the table to its first shape",
+      "- on the inserted column's border returns the table to its first shape",
       backToStart.rows === rows0 && backToStart.cols === cols0 && backToStart.frames === shape0.frames,
       `${JSON.stringify(shape0)} -> ${JSON.stringify(backToStart)}`,
     );
 
-    /* ------------------------------ a clicked cell keeps its removals up */
-    const pinned = await cellPoint(1, 1);
-    await cdp.clickPoint(pinned.x, pinned.y);
-    await sleep(320);
-    const afterPin = await pills();
-    check(
-      "clicking a cell pins its removals",
-      Boolean(afterPin.row?.visible && afterPin.col?.visible && afterPin.row.at === 1 && !afterPin.insert?.visible),
-      JSON.stringify({ row: afterPin.row?.at, col: afterPin.col?.at, insert: afterPin.insert?.visible }),
-    );
-
+    /* --------------------- the pills follow the pointer, they do not stick */
+    await hoverLeftBorder(1);
+    await waitPill(".grid-add-row-del", 1);
     await moveTo(60, 320); // empty canvas, well clear of the table
-    const keptAfterLeave = await pills();
+    await sleep(240);
+    const away = await pills();
     check(
-      "the pinned removals stay up after the pointer leaves the cell",
-      Boolean(keptAfterLeave.row?.visible && keptAfterLeave.col?.visible && keptAfterLeave.row.at === 1),
-      JSON.stringify({ row: keptAfterLeave.row?.visible, col: keptAfterLeave.col?.visible }),
+      "the border pills leave when the pointer does",
+      !away.insert?.visible && !away.row?.visible && !away.col?.visible,
+      JSON.stringify({ insert: away.insert?.visible, row: away.row?.visible, col: away.col?.visible }),
     );
 
-    await clickPill(".grid-add-row-del");
-    await waitRows(rows0 - 1);
-    const afterPinnedDrop = await gridShape(tableGrid);
-    const onceDropped = await pills();
-    check(
-      "the pinned removal deletes that row from a distance",
-      afterPinnedDrop.rows === rows0 - 1 && afterPinnedDrop.cols === cols0,
-      JSON.stringify(afterPinnedDrop),
-    );
-    check(
-      "the pin clears once the row is gone",
-      !onceDropped.row?.visible && !onceDropped.col?.visible,
-      JSON.stringify({ row: onceDropped.row?.visible, col: onceDropped.col?.visible }),
-    );
-
-    /* put the row back so the resize checks below see the usual 4 x 3 */
-    const shrunk = await gridGeom();
-    await hoverLine("row", shrunk.rows.length);
-    await waitPill(".grid-add-insert", shrunk.rows.length);
-    await clickPill(".grid-add-insert");
-    await waitRows(rows0);
-
-    /* a click on plain canvas should drop the pin again */
-    const pinBack = await cellPoint(1, 1);
-    await cdp.clickPoint(pinBack.x, pinBack.y);
-    await sleep(340);
-    const emptySpot = await cdp.evaluate(`(() => {
-      const r = document.querySelector(".canvas").getBoundingClientRect();
-      return { x: r.right - 240, y: r.bottom - 120 };
-    })()`);
-    await cdp.clickPoint(emptySpot.x, emptySpot.y);
-    await sleep(420);
-    const afterEmptyClick = await pills();
-    check(
-      "a click on empty canvas clears the pin",
-      !afterEmptyClick.row?.visible && !afterEmptyClick.col?.visible,
-      JSON.stringify({ x: Math.round(emptySpot.x), row: afterEmptyClick.row?.visible, col: afterEmptyClick.col?.visible }),
-    );
-
-    /* a cell the board itself selects keeps its removals without a press */
-    const pickedByBoard = await cdp.evaluate(`(() => {
-      const api = window.__boardsApi;
-      const cell = api.getSceneElements().find(
-        (el) => el.customData?.grid === ${JSON.stringify(tableGrid)} &&
-          Number(el.customData?.r) === 1 && Number(el.customData?.c) === 1 && !el.isDeleted,
-      );
-      if (!cell) return null;
-      api.updateScene({
-        appState: { selectedElementIds: { [cell.id]: true }, selectedGroupIds: {}, editingGroupId: null },
-        captureUpdate: "NEVER",
-      });
-      return cell.id;
-    })()`);
-    await moveTo(60, 320); // the pointer is nowhere near the table
-    await sleep(340);
-    const byBoard = await pills();
-    check(
-      "a cell selected on the board shows its removals too",
-      Boolean(pickedByBoard && byBoard.row?.visible && byBoard.col?.visible && byBoard.row.at === 1),
-      JSON.stringify({ picked: Boolean(pickedByBoard), row: byBoard.row?.at, col: byBoard.col?.at }),
-    );
-    await cdp.evaluate(`(() => {
-      window.__boardsApi.updateScene({ appState: { selectedElementIds: {} }, captureUpdate: "NEVER" });
-    })()`);
-    await sleep(320);
 
     /* ----------------------------- a click picks one cell, not the table */
     const selection = () =>
@@ -1496,7 +1438,7 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(stretched.merged),
     );
 
-    await hoverCell(2, 2);
+    await hoverLeftBorder(2);
     await waitPill(".grid-add-row-del", 2);
     await clickPill(".grid-add-row-del");
     await cdp.waitFor(
@@ -2395,6 +2337,28 @@ async function openEditor(boardId = BOARD) {
       await moveTo(point.x, point.y);
       return point;
     };
+    /* a class has no cells: its removals live on the side border, level with the
+       field/method line they drop */
+    const classEdge = async (k) => {
+      const point = await cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const frame = api.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.frame && !el.isDeleted);
+        const lines = api.getSceneElements()
+          .filter((el) => el.type === "text" && !el.isDeleted && el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.classLine)
+          .sort((a, b) => a.y - b.y);
+        if (!frame || lines.length < ${k + 1}) return null;
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        return {
+          x: host.left + (frame.x + (s.scrollX || 0)) * zoom,
+          y: host.top + (lines[${k}].y + lines[${k}].height / 2 + (s.scrollY || 0)) * zoom,
+        };
+      })()`.replace(/__GRID__/g, firstClassGrid));
+      if (!point) throw new Error(`class has no edge at line ${k}`);
+      await moveTo(point.x, point.y);
+      return point;
+    };
     await classLine(1);
     await cdp.waitFor(`Number(getComputedStyle(document.querySelector(".grid-add-insert")).opacity) > 0.5`, {
       label: "class line insert pill",
@@ -2416,10 +2380,11 @@ async function openEditor(boardId = BOARD) {
     })()`.replace("__GRID__", firstClassGrid), { label: "class grew a field row" });
     check("+ on a class line inserts a field", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
 
-    await hoverIntoCell(firstClassGrid);
+    await classEdge(1);
+    await waitPill(".grid-add-row-del", 1);
     const classCellPills = await pills();
     check(
-      "a class cell offers only the row removal",
+      "a class border offers only the row removal",
       classCellPills.row?.visible === true &&
         classCellPills.row.label === "ลบแถวที่ชี้" &&
         classCellPills.col?.visible === false &&
@@ -2431,7 +2396,7 @@ async function openEditor(boardId = BOARD) {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore};
     })()`.replace("__GRID__", firstClassGrid), { label: "class lost a field row" });
-    check("- on a class cell drops that field", (await classFields()) === fieldsBefore, `${fieldsBefore} fields`);
+    check("- on a class border drops that field", (await classFields()) === fieldsBefore, `${fieldsBefore} fields`);
 
     /* two classes picked together are linked — never cloned */
     await openErPanel();
