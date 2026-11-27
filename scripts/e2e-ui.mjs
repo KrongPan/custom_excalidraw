@@ -786,16 +786,55 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check("the inserted table has a grid handle target", Boolean(tableGrid), String(tableGrid));
     const tableBefore = await gridShape(tableGrid);
+    const handleBox = (gridId) =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
+        if (!els.length) return null;
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        const left = Math.min(...els.map((el) => el.x));
+        const top = Math.min(...els.map((el) => el.y));
+        const right = Math.max(...els.map((el) => el.x + el.width));
+        const bottom = Math.max(...els.map((el) => el.y + el.height));
+        const tl = { x: host.left + (left + (s.scrollX || 0)) * zoom, y: host.top + (top + (s.scrollY || 0)) * zoom };
+        const br = { x: host.left + (right + (s.scrollX || 0)) * zoom, y: host.top + (bottom + (s.scrollY || 0)) * zoom };
+        const box = (sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2 };
+        };
+        return {
+          table: { left: tl.x, top: tl.y, right: br.x, bottom: br.y, cx: (tl.x + br.x) / 2, cy: (tl.y + br.y) / 2 },
+          row: box(".grid-add-row"),
+          col: box(".grid-add-col"),
+          labels: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label")),
+        };
+      })()`);
     await hoverFrame(tableGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
-    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "grid add menu" });
-    const addRows = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].map((b) => b.textContent.trim())`);
+    const handles = await handleBox(tableGrid);
     check(
-      "the + offers a row and a column",
-      addRows.join("|") === "+ แถว|+ คอลัมน์",
-      JSON.stringify(addRows),
+      "a table offers one handle per axis",
+      handles.labels.join("|") === "เพิ่มแถว|เพิ่มคอลัมน์",
+      JSON.stringify(handles.labels),
     );
-    await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].find((b) => b.textContent.trim() === "+ แถว").click()`);
+    check(
+      "+ แถว is centred under the bottom edge",
+      Boolean(handles.row) &&
+        Math.abs(handles.row.cx - handles.table.cx) <= 2 &&
+        handles.row.top >= handles.table.bottom - 1,
+      `row ${JSON.stringify(handles.row)} table ${JSON.stringify(handles.table)}`,
+    );
+    check(
+      "+ คอลัมน์ is centred beside the right edge",
+      Boolean(handles.col) &&
+        Math.abs(handles.col.cy - handles.table.cy) <= 2 &&
+        handles.col.left >= handles.table.right - 1,
+      `col ${JSON.stringify(handles.col)} table ${JSON.stringify(handles.table)}`,
+    );
+    await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
     await cdp.waitFor(`(() => {
       const api = window.__boardsApi;
       const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
@@ -811,9 +850,7 @@ async function openEditor(boardId = BOARD) {
       `${JSON.stringify(tableBefore)} -> ${JSON.stringify(rowGrown)}`,
     );
     await hoverFrame(tableGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
-    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "grid add menu again" });
-    await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].find((b) => b.textContent.trim() === "+ คอลัมน์").click()`);
+    await cdp.evaluate(`document.querySelector(".grid-add-col").click()`);
     await cdp.waitFor(`(() => {
       const api = window.__boardsApi;
       const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && !el.isDeleted);
@@ -1512,10 +1549,12 @@ async function openEditor(boardId = BOARD) {
       })()`.replace("__GRID__", firstClassGrid));
     const fieldsBefore = await classFields();
     await hoverFrame(firstClassGrid);
-    await cdp.evaluate(`document.querySelector(".grid-add-btn").click()`);
-    await cdp.waitFor(`!!document.querySelector(".grid-add-menu")`, { label: "class add menu" });
-    const classAddRows = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-row")].map((b) => b.textContent.trim())`);
-    check("a class grows only its field rows from +", classAddRows.join("|") === "+ แถว", JSON.stringify(classAddRows));
+    const classHandles = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label"))`);
+    check(
+      "a class grows only its field rows — it has no column handle",
+      classHandles.join("|") === "เพิ่มแถว",
+      JSON.stringify(classHandles),
+    );
     await cdp.evaluate(`document.querySelector(".grid-add-row").click()`);
     await cdp.waitFor(`(() => {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);

@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { tableBounds } from "./table.js";
 
-/* One `+` handle that rides the bottom-right corner of whichever table the
-   pointer is over. It grows that table in place — a row or a column — and never
-   spawns a second one. Like GridOverlay it paints into an overlay above the
-   Excalidraw canvases and reads scene geometry every frame, so panning/zooming
-   keeps the button glued to the table without a React render per frame: only
-   entering or leaving a table flips state, every other frame writes styles
-   straight to the DOM. */
+/* Two growth handles that ride whichever table the pointer is over: one on the
+   bottom edge that adds a row, one on the right edge that adds a column. The
+   table grows in place and never spawns a second one. Each button sits on the
+   axis it grows along, so the direction is obvious without a menu.
 
-/** How far outside a grid the pointer may stray before the button leaves. */
+   Like GridOverlay it paints into an overlay above the Excalidraw canvases and
+   reads scene geometry every frame, so panning/zooming keeps the buttons glued
+   to the table without a React render per frame: only entering or leaving a
+   table flips state, every other frame writes styles straight to the DOM. */
+
+/** How far outside a grid the pointer may stray before the buttons leave. */
 const HIT_PAD = 30;
-/** The handle sits beside the corner, not on its border (screen px). */
-const HANDLE_GAP = 14;
+/** The handles sit beside the edge, not on its border (screen px). */
+const HANDLE_GAP = 10;
 /** Mousedown inside Excalidraw chrome is not a grid hover. */
 const IGNORE = ".grid-add, .relation-panel, .panel, .Island, .App-toolbar, .App-menu";
 
@@ -37,6 +39,8 @@ function gridAt(scene, x, y, pad = HIT_PAD) {
     const box = {
       left: bounds.left,
       top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
       right: bounds.left + bounds.width,
       bottom: bounds.top + bounds.height,
     };
@@ -49,47 +53,35 @@ function gridAt(scene, x, y, pad = HIT_PAD) {
 
 export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
   const rootRef = useRef(null);
+  const rowRef = useRef(null);
+  const colRef = useRef(null);
   const pointerRef = useRef(null);
   const hoveredRef = useRef(null);
-  const openRef = useRef(false);
   const [visible, setVisible] = useState(false);
   const [kind, setKind] = useState("table");
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    openRef.current = open;
-  }, [open]);
 
   useEffect(() => {
     const host = canvasRef.current;
     if (!host) return undefined;
 
-    // The move listener sits on the window, not on the canvas: the handle is
+    // The move listener sits on the window, not on the canvas: the buttons are
     // painted beside the table, outside the canvas box, so a canvas-only
-    // listener fires pointerleave the moment the pointer reaches for it and the
-    // button would vanish before it could be clicked.
+    // listener fires pointerleave the moment the pointer reaches for them and
+    // they would vanish before they could be clicked. Moves that happen on our
+    // own buttons are ignored rather than recorded, which keeps the last
+    // in-canvas position (and therefore the hovered table) alive until the
+    // pointer leaves for somewhere that is neither.
     const onMove = (event) => {
       if (event.target instanceof Element) {
-        // our own handle and menu keep the table they belong to
         if (event.target.closest(".grid-add")) return;
         if (event.target.closest(IGNORE)) {
-          if (!openRef.current) pointerRef.current = null;
+          pointerRef.current = null;
           return;
         }
       }
       pointerRef.current = { clientX: event.clientX, clientY: event.clientY };
-      if (openRef.current) setOpen(false);
-    };
-    const onDown = (event) => {
-      if (event.target instanceof Element && event.target.closest(".grid-add")) return;
-      if (openRef.current) setOpen(false);
-    };
-    const onKey = (event) => {
-      if (event.key === "Escape" && openRef.current) setOpen(false);
     };
     window.addEventListener("pointermove", onMove, true);
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey);
 
     let frame = 0;
     const paint = () => {
@@ -97,58 +89,56 @@ export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
       const api = apiRef.current;
       const el = rootRef.current;
       if (!api || !el) return;
-      if (!openRef.current) {
-        const pointer = pointerRef.current;
-        const state = api.getAppState();
-        const zoom = state.zoom?.value || 1;
-        const scrollX = state.scrollX || 0;
-        const scrollY = state.scrollY || 0;
-        let hit = null;
-        if (pointer) {
-          const rect = host.getBoundingClientRect();
-          const sceneX = (pointer.clientX - rect.left) / zoom - scrollX;
-          const sceneY = (pointer.clientY - rect.top) / zoom - scrollY;
-          // the handle is a fixed 24 CSS px: pad in scene units so the outer
-          // half of it still counts at low zoom
-          hit = gridAt(api.getSceneElements(), sceneX, sceneY, HIT_PAD / zoom);
-        }
-        const prevGrid = hoveredRef.current ? hoveredRef.current.grid : null;
-        const nextGrid = hit ? hit.grid : null;
-        if (nextGrid !== prevGrid) {
-          hoveredRef.current = hit;
-          setVisible(Boolean(hit));
-          if (hit) setKind(hit.kind);
-        } else if (hit) {
-          hoveredRef.current = hit;
-        }
-        if (!hit) return;
-      }
 
-      const target = hoveredRef.current;
-      if (!target) return;
+      const pointer = pointerRef.current;
       const state = api.getAppState();
       const zoom = state.zoom?.value || 1;
       const scrollX = state.scrollX || 0;
       const scrollY = state.scrollY || 0;
-      const [left, top] = [
-        (target.box.right + scrollX) * zoom + HANDLE_GAP,
-        (target.box.bottom + scrollY) * zoom + HANDLE_GAP,
-      ];
-      el.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+      let hit = null;
+      if (pointer) {
+        const rect = host.getBoundingClientRect();
+        const sceneX = (pointer.clientX - rect.left) / zoom - scrollX;
+        const sceneY = (pointer.clientY - rect.top) / zoom - scrollY;
+        // the handles are fixed CSS px: pad in scene units so the outer half of
+        // them still counts at low zoom
+        hit = gridAt(api.getSceneElements(), sceneX, sceneY, HIT_PAD / zoom);
+      }
+      const prevGrid = hoveredRef.current ? hoveredRef.current.grid : null;
+      const nextGrid = hit ? hit.grid : null;
+      if (nextGrid !== prevGrid) {
+        hoveredRef.current = hit;
+        setVisible(Boolean(hit));
+        if (hit) setKind(hit.kind);
+      } else if (hit) {
+        hoveredRef.current = hit;
+      }
+      if (!hit) return;
+
+      const { box } = hit;
+      const rowX = (box.left + box.width / 2 + scrollX) * zoom;
+      const rowY = (box.bottom + scrollY) * zoom + HANDLE_GAP;
+      const row = rowRef.current;
+      if (row) {
+        row.style.transform = `translate(${Math.round(rowX - row.offsetWidth / 2)}px, ${Math.round(rowY)}px)`;
+      }
+      const col = colRef.current;
+      if (col) {
+        const colX = (box.right + scrollX) * zoom + HANDLE_GAP;
+        const colY = (box.top + box.height / 2 + scrollY) * zoom;
+        col.style.transform = `translate(${Math.round(colX)}px, ${Math.round(colY - col.offsetHeight / 2)}px)`;
+      }
     };
 
     frame = window.requestAnimationFrame(paint);
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey);
     };
   }, [apiRef, canvasRef]);
 
   const grow = (axis) => {
     const target = hoveredRef.current;
-    setOpen(false);
     hoveredRef.current = null;
     pointerRef.current = null;
     setVisible(false);
@@ -158,41 +148,45 @@ export default function GridAddControl({ apiRef, canvasRef, onGrow }) {
   const isClass = kind === "class";
 
   return (
-    <div
-      className={`grid-add${visible || open ? " visible" : ""}${open ? " open" : ""}`}
-      ref={rootRef}
-      aria-hidden={!(visible || open)}
-    >
+    <div className={`grid-add${visible ? " visible" : ""}`} ref={rootRef} aria-hidden={!visible}>
       <button
+        ref={rowRef}
         type="button"
-        className="grid-add-btn"
-        aria-label="เพิ่มแถวหรือคอลัมน์ในตารางนี้"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title="เพิ่มแถวหรือคอลัมน์"
+        className="grid-add-btn grid-add-row"
+        aria-label="เพิ่มแถว"
+        title="เพิ่มแถว"
         tabIndex={visible ? 0 : -1}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          setOpen((value) => !value);
+          grow("row");
         }}
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
           <path d="M12 5v14M5 12h14" />
         </svg>
+        แถว
       </button>
-      {open ? (
-        <div className="grid-add-menu" role="menu" aria-label="เพิ่มในตาราง">
-          <button type="button" role="menuitem" className="grid-add-row" onClick={() => grow("row")}>
-            + แถว
-          </button>
-          {isClass ? null : (
-            <button type="button" role="menuitem" className="grid-add-row" onClick={() => grow("col")}>
-              + คอลัมน์
-            </button>
-          )}
-        </div>
-      ) : null}
+      {isClass ? null : (
+        <button
+          ref={colRef}
+          type="button"
+          className="grid-add-btn grid-add-col"
+          aria-label="เพิ่มคอลัมน์"
+          title="เพิ่มคอลัมน์"
+          tabIndex={visible ? 0 : -1}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            grow("col");
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true" focusable="false">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          คอลัมน์
+        </button>
+      )}
     </div>
   );
 }
