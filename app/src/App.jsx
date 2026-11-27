@@ -1488,7 +1488,6 @@ export default function App() {
       }
       const rebuilt = [...placed, ...restored];
 
-      const firstCell = placed.find((el) => isGridCell(el, meta.grid));
       // Rebuild in place, not at the end of the scene: the frame must stay
       // below its cells (and the table below later elements), exactly like a
       // freshly inserted grid.
@@ -1507,7 +1506,9 @@ export default function App() {
       if (!rebuiltPlaced) nextElements.push(...rebuilt);
       api.updateScene({
         elements: nextElements,
-        appState: { selectedElementIds: firstCell ? { [firstCell.id]: true } : {} },
+        // a rebuild keeps no selection: ids are positional, so the old pick
+        // would land on a different cell (and the edge pills would stay up)
+        appState: { selectedElementIds: {} },
         // one rebuild = one undo step; without this Excalidraw coalesces several
         // rebuilds into one entry and an undo lands on a half-applied scene
         captureUpdate: "IMMEDIATELY",

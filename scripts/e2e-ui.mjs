@@ -860,7 +860,7 @@ async function openEditor(boardId = BOARD) {
             at: Number(el.dataset.at),
             label: el.getAttribute("aria-label"),
             text: (el.textContent || "").trim(),
-            visible: Number(style.opacity) > 0.5 && style.pointerEvents !== "none" && r.width > 0,
+            visible: Number(style.opacity) > 0.5 && r.width > 0,
             left: r.left, top: r.top, right: r.right, bottom: r.bottom,
             cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2,
             disabled: el.disabled,
@@ -1011,12 +1011,13 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(cellView),
     );
     check(
-      "the removals float above that cell, clear of its top edge",
+      "the removals sit outside the table, clear of every cell",
       Boolean(cellView.row && cellView.col) &&
-        cellView.row.cy <= cellGeom.rows[1].top - 4 &&
-        Math.abs(cellView.row.cy - cellView.col.cy) <= 1 &&
-        cellView.col.left > cellView.row.right,
-      `row ${JSON.stringify(cellView.row)} col ${JSON.stringify(cellView.col)} cell ${JSON.stringify(cellGeom.rows[1])}`,
+        cellView.row.right <= cellGeom.table.left - 4 &&
+        Math.abs(cellView.row.cy - (cellGeom.rows[1].top + cellGeom.rows[1].bottom) / 2) <= 2 &&
+        cellView.col.bottom <= cellGeom.table.top - 4 &&
+        Math.abs(cellView.col.cx - (cellGeom.cols[1].left + cellGeom.cols[1].right) / 2) <= 2,
+      `row ${JSON.stringify(cellView.row)} col ${JSON.stringify(cellView.col)} table ${JSON.stringify(cellGeom.table)}`,
     );
 
     /* a line offers one insert, at that exact boundary */
@@ -1239,6 +1240,33 @@ async function openEditor(boardId = BOARD) {
       !afterEmptyClick.row?.visible && !afterEmptyClick.col?.visible,
       JSON.stringify({ x: Math.round(emptySpot.x), row: afterEmptyClick.row?.visible, col: afterEmptyClick.col?.visible }),
     );
+
+    /* a cell the board itself selects keeps its removals without a press */
+    const pickedByBoard = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const cell = api.getSceneElements().find(
+        (el) => el.customData?.grid === ${JSON.stringify(tableGrid)} &&
+          Number(el.customData?.r) === 1 && Number(el.customData?.c) === 1 && !el.isDeleted,
+      );
+      if (!cell) return null;
+      api.updateScene({
+        appState: { selectedElementIds: { [cell.id]: true }, selectedGroupIds: {}, editingGroupId: null },
+        captureUpdate: "NEVER",
+      });
+      return cell.id;
+    })()`);
+    await moveTo(60, 320); // the pointer is nowhere near the table
+    await sleep(340);
+    const byBoard = await pills();
+    check(
+      "a cell selected on the board shows its removals too",
+      Boolean(pickedByBoard && byBoard.row?.visible && byBoard.col?.visible && byBoard.row.at === 1),
+      JSON.stringify({ picked: Boolean(pickedByBoard), row: byBoard.row?.at, col: byBoard.col?.at }),
+    );
+    await cdp.evaluate(`(() => {
+      window.__boardsApi.updateScene({ appState: { selectedElementIds: {} }, captureUpdate: "NEVER" });
+    })()`);
+    await sleep(320);
 
     /* ----------------------------- a click picks one cell, not the table */
     const selection = () =>

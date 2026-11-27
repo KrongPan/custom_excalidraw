@@ -141,6 +141,9 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
   const minusRowRef = useRef(null);
   const minusColRef = useRef(null);
   const pointerRef = useRef(null);
+  // the pointer even while it is over a pill (pointerRef is held back there so
+  // the grid under it is not lost); used to decide whether a pill is aimed at
+  const rawRef = useRef(null);
   const viewRef = useRef(null);
   // a cell that was clicked keeps its removals on screen after the pointer
   // leaves, otherwise the pills vanish on the way to them and cannot be pressed
@@ -158,6 +161,7 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
     const host = canvasRef.current;
     if (!host) return undefined;
     const onMove = (event) => {
+      rawRef.current = { x: event.clientX, y: event.clientY };
       // chasing a pill must not drop the grid it belongs to
       if (event.target instanceof Element && event.target.closest(".grid-add")) return;
       pointerRef.current = { x: event.clientX, y: event.clientY };
@@ -214,6 +218,7 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
     };
 
     const onDown = (event) => {
+      rawRef.current = { x: event.clientX, y: event.clientY };
       // pressing a pill must not disturb the pin it belongs to; any other press
       // asks the next frame to re-pin under the pointer or drop the old pin
       const chrome = event.target instanceof Element && event.target.closest(IGNORE);
@@ -273,9 +278,12 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
     const place = (el, boxed, visible) => {
       if (!el) return;
       el.style.opacity = visible ? "1" : "0";
-      el.style.pointerEvents = visible ? "auto" : "none";
-      if (!boxed) return;
-      el.style.transform = `translate(${Math.round(boxed.x)}px, ${Math.round(boxed.y)}px)`;
+      if (!visible) {
+        el.style.pointerEvents = "none";
+        return;
+      }
+      el.style.pointerEvents = "auto";
+      if (boxed) el.style.transform = `translate(${Math.round(boxed.x)}px, ${Math.round(boxed.y)}px)`;
     };
 
     // The two removal pills for one cell/line; returns the view it painted so
@@ -298,17 +306,31 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
       const rowWidth = minusRow?.offsetWidth || 62;
       const colWidth = minusCol?.offsetWidth || 62;
       const height = minusRow?.offsetHeight || 26;
-      const x = kind === "class" ? screenX(geometry.bounds.left) : screenX(colEntry.left);
-      const y = screenY(rowEntry.top) - HANDLE_GAP - height;
-      const boxRow = {
-        x: Math.max(EDGE, Math.min(x, hostW - rowWidth - EDGE)),
-        y: Math.max(EDGE, Math.min(y, hostH - height - EDGE)),
-      };
-      place(minusRow, boxRow, true);
+      // outside the table, not over a cell: a pill that floats above the cell
+      // sits on top of the row above it and swallows clicks meant for that row
+      const left = screenX(geometry.bounds.left);
+      const top = screenY(geometry.bounds.top);
+      const rowMid = screenY((rowEntry.top + rowEntry.bottom) / 2);
+      const colMid = kind === "class" ? left : screenX((colEntry.left + colEntry.right) / 2);
+      place(
+        minusRow,
+        {
+          x: Math.max(EDGE, Math.min(left - HANDLE_GAP - rowWidth, hostW - rowWidth - EDGE)),
+          y: Math.max(EDGE, Math.min(rowMid - height / 2, hostH - height - EDGE)),
+        },
+        true,
+      );
       if (kind === "class") {
         place(minusCol, null, false);
       } else {
-        place(minusCol, { x: Math.max(EDGE, Math.min(boxRow.x + rowWidth + PAIR_GAP, hostW - colWidth - EDGE)), y: boxRow.y }, true);
+        place(
+          minusCol,
+          {
+            x: Math.max(EDGE, Math.min(colMid - colWidth / 2, hostW - colWidth - EDGE)),
+            y: Math.max(EDGE, Math.min(top - HANDLE_GAP - height, hostH - height - EDGE)),
+          },
+          true,
+        );
       }
       place(plus, null, false);
 
@@ -336,25 +358,49 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
       return next;
     };
 
-    /** Re-draw the pinned cell's removals, wherever the pointer went. */
-    const paintPinned = () => {
-      const pin = pinRef.current;
+    /** Re-draw one cell's removals, wherever the pointer went. */
+    const paintPin = (pin) => {
       const api = apiRef.current;
       if (!pin || !api) return false;
       const scene = api.getSceneElements();
       const geometry = pin.kind === "class" ? classGeometry(scene, pin.grid) : tableGeometry(scene, pin.grid);
       const row = geometry?.rows[pin.row];
-      if (!geometry || !row) {
-        pinRef.current = null;
-        return false;
-      }
+      if (!geometry || !row) return false;
       const col = pin.kind === "class" ? { left: geometry.bounds.left } : geometry.cols[pin.col];
-      if (!col) {
-        pinRef.current = null;
-        return false;
-      }
+      if (!col) return false;
       paintCell(geometry, pin.kind, pin.grid, row, col);
       return true;
+    };
+
+    /** Re-draw the pinned cell's removals, wherever the pointer went. */
+    const paintPinned = () => {
+      const pin = pinRef.current;
+      if (!paintPin(pin)) {
+        pinRef.current = null;
+        return false;
+      }
+      return true;
+    };
+
+    /** The cell the board has selected, so its removals stay without a press. */
+    const paintSelection = () => {
+      const api = apiRef.current;
+      if (!api) return false;
+      const state = api.getAppState();
+      const picked = state.selectedElementIds || {};
+      const ids = Object.keys(picked).filter((id) => picked[id]);
+      if (ids.length !== 1) return false;
+      const scene = api.getSceneElements();
+      const el = scene.find((item) => item.id === ids[0] && !item.isDeleted);
+      const data = el?.customData;
+      if (!data?.grid || data.classLine || data.class === true) return false;
+      const row = Number(data.r);
+      const col = Number(data.c);
+      if (!Number.isFinite(row) || !Number.isFinite(col)) return false;
+      const kind = scene.some((item) => item.customData?.grid === data.grid && item.customData?.class === true)
+        ? "class"
+        : "table";
+      return paintPin({ kind, grid: data.grid, row, col });
     };
 
     const paint = () => {
@@ -384,6 +430,8 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
           return;
         }
         if (pinRef.current && paintPinned()) return;
+        // a cell picked earlier keeps its removals even after the pointer leaves
+        if (paintSelection()) return;
         clear();
         return;
       }
@@ -416,6 +464,7 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
           pinPendingRef.current = false;
         }
         if (pinRef.current && paintPinned()) return;
+        if (paintSelection()) return;
         clear();
         setView((old) => (old ? null : old));
         viewRef.current = null;
@@ -532,6 +581,12 @@ export default function GridAddControl({ apiRef, canvasRef, onChange, onPick }) 
     // stale (the rows/columns around them may have shifted)
     pinRef.current = null;
     pinPendingRef.current = false;
+    // the pressed cell is about to be rebuilt (ids are positional, so the old
+    // selection would land on a different cell), so drop it here as well
+    apiRef.current?.updateScene({
+      appState: { selectedElementIds: {}, selectedGroupIds: {}, editingGroupId: null },
+      captureUpdate: "NEVER",
+    });
     if (!current) return;
     const grid = current.grid;
     const kind = current.kind;
