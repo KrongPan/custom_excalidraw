@@ -18,6 +18,7 @@ import {
 import RelationPanel from "./RelationPanel.jsx";
 import RelationWaypoints from "./RelationWaypoints.jsx";
 import GridAddControl from "./GridAddControl.jsx";
+import GridResizeControl from "./GridResizeControl.jsx";
 import ErRowControls from "./ErRowControls.jsx";
 import Minimap from "./Minimap.jsx";
 import LassoTool, { IconLasso } from "./tools/LassoTool.jsx";
@@ -1563,6 +1564,28 @@ export default function App() {
   /** Size one column (index c) of the selected grid; text rewraps to the new width. */
   const resizeCol = useCallback((meta, c, width) => commitResize(meta, "col", c, width), [commitResize]);
 
+  /** Border drag from the canvas: same one-step preview/commit pair as a slider. */
+  const previewGridResize = useCallback(
+    (gridId, axis, index, size) => {
+      const api = apiRef.current;
+      if (!api) return;
+      const meta = describeGrid(api.getSceneElements(), gridId);
+      if (meta) previewResize(meta, axis, index, size);
+    },
+    [describeGrid, previewResize],
+  );
+
+  const commitGridResize = useCallback(
+    (gridId, axis, index, size) => {
+      const api = apiRef.current;
+      if (!api) return false;
+      const meta = describeGrid(api.getSceneElements(), gridId);
+      if (!meta) return false;
+      return commitResize(meta, axis, index, size);
+    },
+    [describeGrid, commitResize],
+  );
+
   const insertTable = useCallback(
     (spec) => {
       const api = apiRef.current;
@@ -2206,6 +2229,12 @@ export default function App() {
         />
         <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
         <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onChange={changeGridFromHandle} />
+        <GridResizeControl
+          apiRef={apiRef}
+          canvasRef={canvasRef}
+          onPreview={previewGridResize}
+          onCommit={commitGridResize}
+        />
         <ErRowControls
           apiRef={apiRef}
           canvasRef={canvasRef}

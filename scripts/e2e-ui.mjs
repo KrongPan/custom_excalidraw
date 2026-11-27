@@ -902,6 +902,165 @@ async function openEditor(boardId = BOARD) {
       `${JSON.stringify(rowBack)} -> ${JSON.stringify(colBack)}`,
     );
 
+    /* ------------------------------------------- drag a cell border to size */
+    const resizeTarget = () =>
+      cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const cells = api.getSceneElements()
+          .filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && el.customData?.c != null && !el.isDeleted);
+        if (!cells.length) return null;
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        const rowTop = new Map();
+        const rowBottom = new Map();
+        const colLeft = new Map();
+        const colRight = new Map();
+        for (const el of cells) {
+          const r = el.customData.r;
+          const c = el.customData.c;
+          rowTop.set(r, Math.min(rowTop.get(r) ?? Infinity, el.y));
+          rowBottom.set(r, Math.max(rowBottom.get(r) ?? -Infinity, el.y + el.height));
+          colLeft.set(c, Math.min(colLeft.get(c) ?? Infinity, el.x));
+          colRight.set(c, Math.max(colRight.get(c) ?? -Infinity, el.x + el.width));
+        }
+        const rows = [...rowTop.keys()].sort((a, b) => a - b).map((r) => ({ r, top: rowTop.get(r), height: rowBottom.get(r) - rowTop.get(r) }));
+        const cols = [...colLeft.keys()].sort((a, b) => a - b).map((c) => ({ c, left: colLeft.get(c), width: colRight.get(c) - colLeft.get(c) }));
+        const sx = (x) => host.left + (x + (s.scrollX || 0)) * zoom;
+        const sy = (y) => host.top + (y + (s.scrollY || 0)) * zoom;
+        const left = cols[0].left;
+        const top = rows[0].top;
+        const right = cols[cols.length - 1].left + cols[cols.length - 1].width;
+        const bottom = rows[rows.length - 1].top + rows[rows.length - 1].height;
+        return {
+          zoom,
+          rows: rows.map((r) => ({ r: r.r, height: Math.round(r.height) })),
+          cols: cols.map((c) => ({ c: c.c, width: Math.round(c.width) })),
+          box: { left: sx(left), top: sy(top), right: sx(right), bottom: sy(bottom) },
+          middle: { x: sx(cols[0].left + cols[0].width / 2), y: sy(rows[0].top + rows[0].height / 2) },
+          rowBorder: { x: sx(left + Math.min(20, cols[0].width / 2)), y: sy(rows[0].top + rows[0].height) },
+          colBorder: { x: sx(cols[0].left + cols[0].width), y: sy(rows[0].top + rows[0].height / 2) },
+        };
+      })()`);
+
+    const tracksNow = async () => {
+      const target = await resizeTarget();
+      return { row0: target.rows[0].height, col0: target.cols[0].width, rows: target.rows.length, cols: target.cols.length };
+    };
+    const beforeResize = await resizeTarget();
+    check(
+      "the table reports borders to drag",
+      Boolean(beforeResize) && beforeResize.rows.length >= 2 && beforeResize.cols.length >= 2,
+      JSON.stringify(beforeResize ? { rows: beforeResize.rows.length, cols: beforeResize.cols.length } : null),
+    );
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: beforeResize.rowBorder.x, y: beforeResize.rowBorder.y, button: "none", buttons: 0,
+    });
+    const rowHandle = await cdp.waitFor(
+      `(() => {
+        const root = document.querySelector(".grid-resize");
+        const line = document.querySelector(".grid-resize-line");
+        return Boolean(root && line) && root.classList.contains("visible") && line.classList.contains("row");
+      })()`,
+      { label: "row border handle" },
+    );
+    const cursors = await cdp.evaluate(`({ row: document.querySelector(".canvas").classList.contains("grid-cursor-row"), col: document.querySelector(".canvas").classList.contains("grid-cursor-col") })`);
+    check(
+      "a row border turns into a resize handle under the pointer",
+      rowHandle && cursors.row && !cursors.col,
+      `${JSON.stringify(cursors)}`,
+    );
+    const rowGrab = beforeResize.rows[0];
+    await cdp.dragPoint(beforeResize.rowBorder.x, beforeResize.rowBorder.y, 0, 36);
+    const afterRowResize = await cdp.waitFor(
+      `(() => {
+        const api = window.__boardsApi;
+        const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r === 0 && el.customData?.c != null && !el.isDeleted);
+        if (!cells.length) return false;
+        const top = Math.min(...cells.map((el) => el.y));
+        const bottom = Math.max(...cells.map((el) => el.y + el.height));
+        return Math.round(bottom - top) === ${rowGrab.height + Math.round(36 / beforeResize.zoom)};
+      })()`,
+      { label: "row border drag committed" },
+    );
+    const resizedRows = await resizeTarget();
+    check(
+      "dragging a row border stretches that row only",
+      Boolean(afterRowResize) &&
+        resizedRows.rows.length === beforeResize.rows.length &&
+        Math.abs(resizedRows.rows[0].height - rowGrab.height - 36 / beforeResize.zoom) <= 2 &&
+        resizedRows.rows.slice(1).every((row, i) => Math.abs(row.height - beforeResize.rows[i + 1].height) <= 1) &&
+        resizedRows.cols.every((col, i) => Math.abs(col.width - beforeResize.cols[i].width) <= 1),
+      `row ${rowGrab.height} -> ${resizedRows.rows[0].height} (zoom ${beforeResize.zoom}); sizes ${JSON.stringify(resizedRows.rows.map((r) => r.height))}`,
+    );
+    const beforeCol = await resizeTarget();
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: beforeCol.colBorder.x, y: beforeCol.colBorder.y, button: "none", buttons: 0,
+    });
+    const colHandle = await cdp.waitFor(
+      `(() => {
+        const root = document.querySelector(".grid-resize");
+        const line = document.querySelector(".grid-resize-line");
+        return Boolean(root && line) && root.classList.contains("visible") && line.classList.contains("col");
+      })()`,
+      { label: "column border handle" },
+    );
+    const cursorsCol = await cdp.evaluate(`({ row: document.querySelector(".canvas").classList.contains("grid-cursor-row"), col: document.querySelector(".canvas").classList.contains("grid-cursor-col") })`);
+    check(
+      "a column border turns into a resize handle under the pointer",
+      colHandle && cursorsCol.col && !cursorsCol.row,
+      `${JSON.stringify(cursorsCol)}`,
+    );
+    const colGrab = beforeCol.cols[0];
+    await cdp.dragPoint(beforeCol.colBorder.x, beforeCol.colBorder.y, 40, 0);
+    await sleep(260);
+    const colWidthNow = await cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.c === 0 && el.customData?.r != null && !el.isDeleted);
+      if (!cells.length) return null;
+      const left = Math.min(...cells.map((el) => el.x));
+      const right = Math.max(...cells.map((el) => el.x + el.width));
+      return Math.round((right - left) * 100) / 100;
+    })()`);
+    check(
+      "dragging a column border stretches that column only",
+      typeof colWidthNow === "number" &&
+        Math.abs(colWidthNow - colGrab.width - 40 / beforeCol.zoom) <= 3,
+      `col ${colGrab.width} -> ${colWidthNow} (zoom ${beforeCol.zoom})`,
+    );
+    const resizedCols = await resizeTarget();
+    check(
+      "the column drag leaves the other tracks alone",
+      resizedCols.cols.length === beforeCol.cols.length &&
+        resizedCols.cols.slice(1).every((col, i) => Math.abs(col.width - beforeCol.cols[i + 1].width) <= 1) &&
+        resizedCols.rows.every((row, i) => Math.abs(row.height - beforeCol.rows[i].height) <= 1),
+      `cols ${JSON.stringify(resizedCols.cols.map((c) => c.width))} rows ${JSON.stringify(resizedCols.rows.map((r) => r.height))}`,
+    );
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: resizedCols.middle.x, y: resizedCols.middle.y, button: "none", buttons: 0,
+    });
+    const hidden = await cdp.waitFor(`!document.querySelector(".grid-resize")?.classList.contains("visible")`, {
+      label: "resize handle leaves the cell middle",
+    });
+    check("the resize handle leaves when the pointer is back inside a cell", hidden, `${hidden}`);
+
+    /* drag both borders back so the rest of the suite sees the table it made */
+    const restoreRow = await resizeTarget();
+    await cdp.dragPoint(restoreRow.rowBorder.x, restoreRow.rowBorder.y, 0, -36);
+    await sleep(200);
+    const restoreCol = await resizeTarget();
+    await cdp.dragPoint(restoreCol.colBorder.x, restoreCol.colBorder.y, -40, 0);
+    await sleep(220);
+    const restored = await tracksNow();
+    check(
+      "dragging a border back restores the track",
+      Math.abs(restored.row0 - rowGrab.height) <= 2 &&
+        Math.abs(restored.col0 - beforeCol.cols[0].width) <= 2 &&
+        restored.rows === beforeCol.rows.length &&
+        restored.cols === beforeCol.cols.length,
+      JSON.stringify(restored),
+    );
+
     /* -------------------------------------------------------- save status */
     const pillSaved = await cdp.waitFor(
       `document.querySelector(".save-pill")?.classList.contains("saved") === true`,

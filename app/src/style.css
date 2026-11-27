@@ -1232,6 +1232,64 @@ code {
   color: var(--muted);
 }
 
+/* --------------------------------------------------- grid border resize */
+
+/* A cell border under the pointer becomes a handle: a line along the whole
+   border, a grip in its middle, and a resize cursor on the canvas. Dragging
+   it sizes the track on the near side and the rest of the grid shifts, so the
+   table keeps tiling. */
+.grid-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  z-index: 7;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 90ms ease;
+}
+
+.grid-resize.visible,
+.grid-resize.dragging {
+  opacity: 1;
+}
+
+.grid-resize-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.7;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.grid-resize.dragging .grid-resize-line {
+  opacity: 1;
+}
+
+.grid-resize-grip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: var(--panel);
+  box-shadow: 0 2px 6px rgba(31, 36, 71, 0.24);
+}
+
+/* Excalidraw writes its cursor inline on the canvas, so this has to win. */
+.canvas.grid-cursor-row canvas {
+  cursor: row-resize !important;
+}
+
+.canvas.grid-cursor-col canvas {
+  cursor: col-resize !important;
+}
+
 .relation-panel {
   position: absolute;
   z-index: 9;
@@ -1419,6 +1477,7 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .grid-add,
   .grid-add-btn,
+  .grid-resize,
   .relation-option,
   .relation-waypoint,
   .relation-waypoint-add {
