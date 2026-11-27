@@ -1084,6 +1084,8 @@ code {
 /* Two growth handles riding the table under the pointer: one on the bottom
    edge that adds a row, one on the right edge that adds a column. The table
    grows in place, it is never cloned. */
+/* A zero-size origin: each pill carries its own transform, so the overlay
+   never swallows a click that belongs to the canvas. */
 .grid-add {
   position: absolute;
   top: 0;
@@ -1092,14 +1094,6 @@ code {
   height: 0;
   z-index: 8;
   pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 120ms ease, visibility 120ms ease;
-}
-
-.grid-add.visible {
-  opacity: 1;
-  visibility: visible;
 }
 
 .grid-add-btn {
@@ -1128,13 +1122,19 @@ code {
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.grid-add.visible .grid-add-btn {
-  pointer-events: auto;
-}
-
 .grid-add-btn svg {
   flex: none;
   color: var(--accent);
+}
+
+.grid-add-btn.grid-add-insert {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line-strong));
+}
+
+.grid-add-btn.grid-add-insert:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 
 .grid-add-btn:hover svg {
@@ -1426,7 +1426,6 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .grid-add,
   .grid-add-btn,
   .grid-resize,
   .relation-option,

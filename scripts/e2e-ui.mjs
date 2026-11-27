@@ -758,27 +758,38 @@ async function openEditor(boardId = BOARD) {
     // hover the middle of a grid: bounds come from its cells, because a plain
     // table only gets a frame element once a relation needs one
     const hoverFrame = async (gridId) => {
-      const point = await cdp.evaluate(`(() => {
+      const centre = () =>
+        cdp.evaluate(`(() => {
+          const api = window.__boardsApi;
+          const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
+          if (!els.length) return null;
+          const s = api.getAppState();
+          const zoom = s.zoom?.value || 1;
+          const host = document.querySelector(".canvas").getBoundingClientRect();
+          const left = Math.min(...els.map((el) => el.x));
+          const top = Math.min(...els.map((el) => el.y));
+          const right = Math.max(...els.map((el) => el.x + el.width));
+          const bottom = Math.max(...els.map((el) => el.y + el.height));
+          return {
+            x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
+            y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
+          };
+        })()`);
+      await cdp.evaluate(`(() => {
         const api = window.__boardsApi;
         const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
-        if (!els.length) return null;
-        const left = Math.min(...els.map((el) => el.x));
-        const top = Math.min(...els.map((el) => el.y));
-        const right = Math.max(...els.map((el) => el.x + el.width));
-        const bottom = Math.max(...els.map((el) => el.y + el.height));
         api.scrollToContent(els, { fitToContent: true, animate: false });
-        const s = api.getAppState();
-        const zoom = s.zoom?.value || 1;
-        const host = document.querySelector(".canvas").getBoundingClientRect();
-        return {
-          x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
-          y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
-        };
       })()`);
+      await sleep(200);
+      const point = await centre();
       if (!point) throw new Error(`grid ${gridId} has no elements to hover`);
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
-      await cdp.waitFor(`document.querySelector(".grid-add")?.classList.contains("visible")`, { label: "grid + handle" });
+      await cdp.waitFor(
+        `[...document.querySelectorAll(".grid-add-btn")].some((el) => Number(getComputedStyle(el).opacity) > 0.5)`,
+        { label: "grid pill" },
+      );
     };
+
     const tableGrid = await cdp.evaluate(`(() => {
       const cell = window.__boardsApi.getSceneElements()
         .find((el) => el.customData?.grid && el.customData?.class !== true && !el.isDeleted);
@@ -786,84 +797,86 @@ async function openEditor(boardId = BOARD) {
     })()`);
     check("the inserted table has a grid handle target", Boolean(tableGrid), String(tableGrid));
     const tableBefore = await gridShape(tableGrid);
-    const handleBox = (gridId) =>
+    /* One pill per surface: a grid line offers an insert at that boundary, a
+       cell offers dropping the row and the column it belongs to. */
+    const gridGeom = () =>
       cdp.evaluate(`(() => {
         const api = window.__boardsApi;
-        const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
-        if (!els.length) return null;
+        const cells = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(tableGrid)} && el.customData?.r != null && el.customData?.c != null && !el.isDeleted);
+        if (!cells.length) return null;
         const s = api.getAppState();
         const zoom = s.zoom?.value || 1;
         const host = document.querySelector(".canvas").getBoundingClientRect();
-        const left = Math.min(...els.map((el) => el.x));
-        const top = Math.min(...els.map((el) => el.y));
-        const right = Math.max(...els.map((el) => el.x + el.width));
-        const bottom = Math.max(...els.map((el) => el.y + el.height));
-        const tl = { x: host.left + (left + (s.scrollX || 0)) * zoom, y: host.top + (top + (s.scrollY || 0)) * zoom };
-        const br = { x: host.left + (right + (s.scrollX || 0)) * zoom, y: host.top + (bottom + (s.scrollY || 0)) * zoom };
-        const box = (sel) => {
-          const el = document.querySelector(sel);
-          if (!el) return null;
-          const r = el.getBoundingClientRect();
-          return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2 };
-        };
-        const pair = (axis, side) => {
-          const q = '[data-axis="' + axis + '"][data-side="' + side + '"]';
-          const a = box(q + '[data-delta="1"]');
-          const d = box(q + '[data-delta="-1"]');
-          if (!a || !d) return null;
-          const pl = Math.min(a.left, d.left);
-          const pr = Math.max(a.right, d.right);
-          const pt = Math.min(a.top, d.top);
-          const pb = Math.max(a.bottom, d.bottom);
-          return { left: pl, right: pr, top: pt, bottom: pb, cx: (pl + pr) / 2, cy: (pt + pb) / 2, add: a, del: d };
-        };
+        const sx = (x) => host.left + (x + (s.scrollX || 0)) * zoom;
+        const sy = (y) => host.top + (y + (s.scrollY || 0)) * zoom;
+        const rowTop = new Map();
+        const rowBottom = new Map();
+        const colLeft = new Map();
+        const colRight = new Map();
+        for (const el of cells) {
+          const r = el.customData.r;
+          const c = el.customData.c;
+          rowTop.set(r, Math.min(rowTop.get(r) ?? Infinity, el.y));
+          rowBottom.set(r, Math.max(rowBottom.get(r) ?? -Infinity, el.y + el.height));
+          colLeft.set(c, Math.min(colLeft.get(c) ?? Infinity, el.x));
+          colRight.set(c, Math.max(colRight.get(c) ?? -Infinity, el.x + el.width));
+        }
         return {
-          table: { left: tl.x, top: tl.y, right: br.x, bottom: br.y, cx: (tl.x + br.x) / 2, cy: (tl.y + br.y) / 2 },
-          top: pair("row", "top"),
-          bottom: pair("row", "bottom"),
-          left: pair("col", "left"),
-          right: pair("col", "right"),
-          labels: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label")),
-          disabled: [...document.querySelectorAll(".grid-add-btn")].map((b) => b.disabled),
+          table: {
+            left: sx(Math.min(...cells.map((el) => el.x))),
+            top: sy(Math.min(...cells.map((el) => el.y))),
+            right: sx(Math.max(...cells.map((el) => el.x + el.width))),
+            bottom: sy(Math.max(...cells.map((el) => el.y + el.height))),
+          },
+          rows: [...rowTop.keys()].sort((a, b) => a - b).map((r) => ({ r, top: sy(rowTop.get(r)), bottom: sy(rowBottom.get(r)) })),
+          cols: [...colLeft.keys()].sort((a, b) => a - b).map((c) => ({ c, left: sx(colLeft.get(c)), right: sx(colRight.get(c)) })),
         };
       })()`);
-    await hoverFrame(tableGrid);
-    const handles = await handleBox(tableGrid);
-    const expectedLabels = [
-      "เพิ่มแถวด้านบน",
-      "ลบแถวบนสุด",
-      "เพิ่มแถวด้านล่าง",
-      "ลบแถวล่างสุด",
-      "เพิ่มคอลัมน์ด้านซ้าย",
-      "ลบคอลัมน์ซ้ายสุด",
-      "เพิ่มคอลัมน์ด้านขวา",
-      "ลบคอลัมน์ขวาสุด",
-    ];
-    check("a table offers add and remove on all four sides", handles.labels.join("|") === expectedLabels.join("|"), JSON.stringify(handles.labels));
-    check(
-      "the top row pair sits above the top edge, centred",
-      Boolean(handles.top) && Math.abs(handles.top.cx - handles.table.cx) <= 2 && handles.top.bottom <= handles.table.top + 1,
-      `top ${JSON.stringify(handles.top)} table ${JSON.stringify(handles.table)}`,
-    );
-    check(
-      "the bottom row pair sits below the bottom edge, centred",
-      Boolean(handles.bottom) && Math.abs(handles.bottom.cx - handles.table.cx) <= 2 && handles.bottom.top >= handles.table.bottom - 1,
-      `bottom ${JSON.stringify(handles.bottom)} table ${JSON.stringify(handles.table)}`,
-    );
-    check(
-      "the left column pair sits outside the left edge, centred",
-      Boolean(handles.left) && Math.abs(handles.left.cy - handles.table.cy) <= 2 && handles.left.right <= handles.table.left + 1,
-      `left ${JSON.stringify(handles.left)} table ${JSON.stringify(handles.table)}`,
-    );
-    check(
-      "the right column pair sits outside the right edge, centred",
-      Boolean(handles.right) && Math.abs(handles.right.cy - handles.table.cy) <= 2 && handles.right.left >= handles.table.right - 1,
-      `right ${JSON.stringify(handles.right)} table ${JSON.stringify(handles.table)}`,
-    );
 
-    const clickHandle = async (axis, side, delta) => {
-      await hoverFrame(tableGrid);
-      await cdp.evaluate(`document.querySelector('[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]').click()`);
+    const pills = () =>
+      cdp.evaluate(`(() => {
+        const read = (selector) => {
+          const el = document.querySelector(selector);
+          if (!el) return null;
+          const style = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return {
+            axis: el.dataset.axis,
+            at: Number(el.dataset.at),
+            label: el.getAttribute("aria-label"),
+            text: (el.textContent || "").trim(),
+            visible: Number(style.opacity) > 0.5 && style.pointerEvents !== "none" && r.width > 0,
+            left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+            cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2,
+            disabled: el.disabled,
+          };
+        };
+        return { insert: read(".grid-add-insert"), row: read(".grid-add-row-del"), col: read(".grid-add-col-del") };
+      })()`);
+
+    const moveTo = async (x, y) => {
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
+      await sleep(90);
+    };
+    const waitPill = (selector, at) =>
+      cdp.waitFor(
+        `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return false;
+          return Number(getComputedStyle(el).opacity) > 0.5 && Number(el.dataset.at) === ${at};
+        })()`,
+        { label: `pill ${selector} at ${at}` },
+      );
+    const clickPill = async (selector) => {
+      const point = await cdp.evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+      })()`);
+      if (!point) throw new Error(`missing pill ${selector}`);
+      await cdp.clickPoint(point.x, point.y);
+      await sleep(420); // the rebuilt grid animates back into view
     };
     const waitRows = (n) =>
       cdp.waitFor(
@@ -909,11 +922,111 @@ async function openEditor(boardId = BOARD) {
         const cell = els.find((el) => el.id === t.containerId);
         return cell ? { r: cell.customData?.r, c: cell.customData?.c } : null;
       })()`);
+    const hoverLine = async (axis, at) => {
+      const g = await gridGeom();
+      if (axis === "row") {
+        const y = at < g.rows.length ? g.rows[at].top : g.table.bottom;
+        await moveTo(g.table.left + 30, y);
+        return g;
+      }
+      const x = at < g.cols.length ? g.cols[at].left : g.table.right;
+      const row = g.rows[1] ?? g.rows[0];
+      await moveTo(x, (row.top + row.bottom) / 2);
+      return g;
+    };
+    const hoverCell = async (r, c) => {
+      const p = await cellPoint(r, c);
+      if (!p) throw new Error(`no cell ${r}:${c} to hover`);
+      await moveTo(p.x, p.y);
+      return gridGeom();
+    };
+    /* a class has no r/c cells: nudge the pointer off its centre until it lands
+       inside a field line instead of on the boundary between two of them */
+    const hoverIntoCell = async (gridId) => {
+      const centre = () =>
+        cdp.evaluate(`(() => {
+          const api = window.__boardsApi;
+          const els = api.getSceneElements().filter((el) => el.customData?.grid === ${JSON.stringify(gridId)} && !el.isDeleted);
+          if (!els.length) return null;
+          const s = api.getAppState();
+          const zoom = s.zoom?.value || 1;
+          const host = document.querySelector(".canvas").getBoundingClientRect();
+          const left = Math.min(...els.map((el) => el.x));
+          const top = Math.min(...els.map((el) => el.y));
+          const right = Math.max(...els.map((el) => el.x + el.width));
+          const bottom = Math.max(...els.map((el) => el.y + el.height));
+          return {
+            x: host.left + ((left + right) / 2 + (s.scrollX || 0)) * zoom,
+            y: host.top + ((top + bottom) / 2 + (s.scrollY || 0)) * zoom,
+            height: (bottom - top) * zoom,
+          };
+        })()`);
+      const point = await centre();
+      if (!point) throw new Error(`grid ${gridId} has no elements to hover`);
+      for (const dy of [10, 14, 18, 22, -10, -14]) {
+        await moveTo(point.x, point.y + dy);
+        if (await cdp.evaluate(`Number(getComputedStyle(document.querySelector(".grid-add-row-del")).opacity) > 0.5`)) return;
+      }
+      throw new Error(`could not land inside a cell of ${gridId}`);
+    };
 
-    /* the first cell gets a word, so an insert on the top or left edge has to
-       carry it to the next r/c instead of leaving it on the wrong cell */
-    await cdp.evaluate(`(() => { try { window.__boardsApi.setActiveTool({ type: "selection" }); } catch { /* older api */ } })()`);
+    /* a cell offers the two removals, and nothing else */
     await hoverFrame(tableGrid);
+    const cellGeom = await hoverCell(1, 1);
+    const cellView = await pills();
+    check(
+      "hovering a cell offers the row and column removals",
+      Boolean(cellView.row?.visible && cellView.col?.visible && cellView.insert && !cellView.insert.visible) &&
+        cellView.row.label === "ลบแถวที่ชี้" &&
+        cellView.col.label === "ลบคอลัมน์ที่ชี้",
+      JSON.stringify(cellView),
+    );
+    check(
+      "the removals float above that cell, clear of its top edge",
+      Boolean(cellView.row && cellView.col) &&
+        cellView.row.cy <= cellGeom.rows[1].top - 4 &&
+        Math.abs(cellView.row.cy - cellView.col.cy) <= 1 &&
+        cellView.col.left > cellView.row.right,
+      `row ${JSON.stringify(cellView.row)} col ${JSON.stringify(cellView.col)} cell ${JSON.stringify(cellGeom.rows[1])}`,
+    );
+
+    /* a line offers one insert, at that exact boundary */
+    const rowLineGeom = await hoverLine("row", 1);
+    await waitPill(".grid-add-insert", 1);
+    const rowLineView = await pills();
+    check(
+      "hovering a row line offers an insert at that boundary",
+      Boolean(rowLineView.insert?.visible) &&
+        rowLineView.insert.axis === "row" &&
+        rowLineView.insert.text === "แถว" &&
+        !rowLineView.row?.visible &&
+        !rowLineView.col?.visible,
+      JSON.stringify(rowLineView),
+    );
+    check(
+      "the row insert sits outside the left edge, level with the line",
+      Boolean(rowLineView.insert) &&
+        rowLineView.insert.right <= rowLineGeom.table.left - 8 &&
+        Math.abs(rowLineView.insert.cy - rowLineGeom.rows[1].top) <= 2,
+      `insert ${JSON.stringify(rowLineView.insert)} line y ${rowLineGeom.rows[1].top} table ${JSON.stringify(rowLineGeom.table)}`,
+    );
+
+    const colLineGeom = await hoverLine("col", 1);
+    await waitPill(".grid-add-insert", 1);
+    const colLineView = await pills();
+    check(
+      "hovering a column line offers an insert, level with that line",
+      Boolean(colLineView.insert?.visible) &&
+        colLineView.insert.axis === "col" &&
+        colLineView.insert.text === "คอลัมน์" &&
+        Math.abs(colLineView.insert.cx - colLineGeom.cols[1].left) <= 2 &&
+        colLineView.insert.bottom <= colLineGeom.table.top - 8,
+      `insert ${JSON.stringify(colLineView.insert)} line x ${colLineGeom.cols[1].left} table ${JSON.stringify(colLineGeom.table)}`,
+    );
+
+    /* the first cell gets a word, so an insert above or before it has to carry
+       the word to the next r/c instead of leaving it on the wrong cell */
+    await cdp.evaluate(`(() => { try { window.__boardsApi.setActiveTool({ type: "selection" }); } catch { /* older api */ } })()`);
     const firstCell = await cellPoint(0, 0);
     await doubleClick(firstCell.x, firstCell.y);
     await cdp.waitFor(`Boolean(document.activeElement && document.activeElement.tagName === "TEXTAREA")`, { label: "cell text editor" });
@@ -937,72 +1050,107 @@ async function openEditor(boardId = BOARD) {
     }))()`);
     check("clicking a cell paints no row/column highlight", painted && painted.overlay === false && painted.badge === false, JSON.stringify(painted));
 
-    const rows0 = tableBefore.rows;
-    const cols0 = tableBefore.cols;
+    const shape0 = await gridShape(tableGrid);
+    const rows0 = shape0.rows;
+    const cols0 = shape0.cols;
 
-    await clickHandle("row", "top", 1);
+    /* insert a row between row 0 and row 1: the word must not move */
+    await hoverLine("row", 1);
+    await waitPill(".grid-add-insert", 1);
+    await clickPill(".grid-add-insert");
     await waitRows(rows0 + 1);
-    const topGrown = await gridShape(tableGrid);
-    const afterTopAdd = await textCell();
+    const midGrown = await gridShape(tableGrid);
+    const afterMid = await textCell();
     check(
-      "+ แถว on the top edge inserts above and pushes the word down",
-      topGrown.rows === rows0 + 1 && topGrown.cols === cols0 && afterTopAdd?.r === 1 && afterTopAdd?.c === 0,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(topGrown)} text ${JSON.stringify(afterTopAdd)}`,
-    );
-    await clickHandle("row", "top", -1);
-    await waitRows(rows0);
-    const afterTopDrop = await textCell();
-    check(
-      "- แถว on the top edge drops the first row and pulls the word back",
-      afterTopDrop?.r === 0 && afterTopDrop?.c === 0,
-      JSON.stringify(afterTopDrop),
+      "+ on a line between rows 0 and 1 inserts there and leaves the word above",
+      midGrown.rows === rows0 + 1 && midGrown.cols === cols0 && afterMid?.r === 0 && afterMid?.c === 0,
+      `${JSON.stringify(shape0)} -> ${JSON.stringify(midGrown)} text ${JSON.stringify(afterMid)}`,
     );
 
-    await clickHandle("row", "bottom", 1);
+    /* drop that same row by pointing at one of its cells */
+    await hoverCell(1, 0);
+    await waitPill(".grid-add-row-del", 1);
+    const dropView = await pills();
+    check(
+      "the cell removal names the hovered row",
+      dropView.row.at === 1 && dropView.col.at === 0 && !dropView.insert?.visible,
+      JSON.stringify(dropView),
+    );
+    await clickPill(".grid-add-row-del");
+    await waitRows(rows0);
+    const afterDrop = await textCell();
+    check(
+      "- on a cell drops exactly that row and keeps the word",
+      (await gridShape(tableGrid)).rows === rows0 && afterDrop?.r === 0 && afterDrop?.c === 0,
+      JSON.stringify(afterDrop),
+    );
+
+    /* insert above the first row: the word slides down one */
+    await hoverLine("row", 0);
+    await waitPill(".grid-add-insert", 0);
+    await clickPill(".grid-add-insert");
     await waitRows(rows0 + 1);
-    const bottomGrown = await gridShape(tableGrid);
+    const afterTop = await textCell();
     check(
-      "+ แถว on the bottom edge appends a row to the same table",
-      bottomGrown.rows === rows0 + 1 && bottomGrown.frames === tableBefore.frames && bottomGrown.arrows === 0,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(bottomGrown)}`,
+      "+ on the top edge inserts above the word and pushes it down",
+      (await gridShape(tableGrid)).rows === rows0 + 1 && afterTop?.r === 1 && afterTop?.c === 0,
+      JSON.stringify(afterTop),
     );
-    await clickHandle("row", "bottom", -1);
-    await waitRows(rows0);
-    check("- แถว on the bottom edge drops the last row", (await gridShape(tableGrid)).rows === rows0, `${rows0} rows`);
 
-    await clickHandle("col", "left", 1);
+    /* and drop that empty first row from its cell */
+    await hoverCell(0, 0);
+    await waitPill(".grid-add-row-del", 0);
+    await clickPill(".grid-add-row-del");
+    await waitRows(rows0);
+    const afterFrontDrop = await textCell();
+    check(
+      "- on the first row's cell drops it and pulls the word back up",
+      (await gridShape(tableGrid)).rows === rows0 && afterFrontDrop?.r === 0 && afterFrontDrop?.c === 0,
+      JSON.stringify(afterFrontDrop),
+    );
+
+    /* same for columns: insert before the word, then drop the empty column */
+    await hoverLine("col", 0);
+    await waitPill(".grid-add-insert", 0);
+    await clickPill(".grid-add-insert");
     await waitCols(cols0 + 1);
-    const leftGrown = await gridShape(tableGrid);
     const afterLeftAdd = await textCell();
     check(
-      "+ คอลัมน์ on the left edge inserts before the word and pushes it right",
-      leftGrown.cols === cols0 + 1 && leftGrown.frames === tableBefore.frames && afterLeftAdd?.c === 1 && afterLeftAdd?.r === 0,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(leftGrown)} text ${JSON.stringify(afterLeftAdd)}`,
+      "+ on the left edge inserts before the word and pushes it right",
+      (await gridShape(tableGrid)).cols === cols0 + 1 && afterLeftAdd?.r === 0 && afterLeftAdd?.c === 1,
+      JSON.stringify(afterLeftAdd),
     );
-    await clickHandle("col", "left", -1);
+    await hoverCell(0, 0);
+    await waitPill(".grid-add-col-del", 0);
+    await clickPill(".grid-add-col-del");
     await waitCols(cols0);
     const afterLeftDrop = await textCell();
     check(
-      "- คอลัมน์ on the left edge drops the first column and pulls the word back",
-      afterLeftDrop?.c === 0 && afterLeftDrop?.r === 0,
+      "- on the first column's cell drops it and pulls the word back",
+      (await gridShape(tableGrid)).cols === cols0 && afterLeftDrop?.r === 0 && afterLeftDrop?.c === 0,
       JSON.stringify(afterLeftDrop),
     );
 
-    await clickHandle("col", "right", 1);
+    /* a column inserted in the middle keeps the word where it was */
+    await hoverLine("col", 2);
+    await waitPill(".grid-add-insert", 2);
+    await clickPill(".grid-add-insert");
     await waitCols(cols0 + 1);
-    const rightGrown = await gridShape(tableGrid);
+    const afterMidCol = await textCell();
     check(
-      "+ คอลัมน์ on the right edge appends a column to the same table",
-      rightGrown.cols === cols0 + 1 && rightGrown.frames === tableBefore.frames,
-      `${JSON.stringify(tableBefore)} -> ${JSON.stringify(rightGrown)}`,
+      "+ between columns 1 and 2 inserts there and leaves the word alone",
+      (await gridShape(tableGrid)).cols === cols0 + 1 && afterMidCol?.r === 0 && afterMidCol?.c === 0,
+      JSON.stringify(afterMidCol),
     );
-    await clickHandle("col", "right", -1);
+    await hoverCell(0, 2); // the column inserted at boundary 2 now sits there
+    await waitPill(".grid-add-col-del", 2);
+    await clickPill(".grid-add-col-del");
     await waitCols(cols0);
-    const back = await gridShape(tableGrid);
+    const backToStart = await gridShape(tableGrid);
     check(
-      "- คอลัมน์ on the right edge drops the last column",
-      back.cols === cols0 && back.rows === rows0 && back.frames === tableBefore.frames,
-      `${JSON.stringify(rightGrown)} -> ${JSON.stringify(back)}`,
+      "- on the inserted column's cell returns the table to its first shape",
+      backToStart.rows === rows0 && backToStart.cols === cols0 && backToStart.frames === shape0.frames,
+      `${JSON.stringify(shape0)} -> ${JSON.stringify(backToStart)}`,
     );
 
     /* ------------------------------------------- drag a cell border to size */
@@ -1849,26 +1997,65 @@ async function openEditor(boardId = BOARD) {
         return frame?.customData?.classData?.fields?.length ?? -1;
       })()`.replace("__GRID__", firstClassGrid));
     const fieldsBefore = await classFields();
-    await hoverFrame(firstClassGrid);
-    const classHandles = await cdp.evaluate(`[...document.querySelectorAll(".grid-add-btn")].map((b) => b.getAttribute("aria-label"))`);
+    /* the class's first row boundary is the top of its second line */
+    const classLine = async (k) => {
+      const point = await cdp.evaluate(`(() => {
+        const api = window.__boardsApi;
+        const frame = api.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.frame && !el.isDeleted);
+        const lines = api.getSceneElements()
+          .filter((el) => el.type === "text" && !el.isDeleted && el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.classLine)
+          .sort((a, b) => a.y - b.y);
+        if (!frame || lines.length < ${k + 1}) return null;
+        const s = api.getAppState();
+        const zoom = s.zoom?.value || 1;
+        const host = document.querySelector(".canvas").getBoundingClientRect();
+        return {
+          x: host.left + (frame.x + frame.width / 2 + (s.scrollX || 0)) * zoom,
+          y: host.top + (lines[${k}].y + (s.scrollY || 0)) * zoom,
+          lines: lines.length,
+        };
+      })()`.replace(/__GRID__/g, firstClassGrid));
+      if (!point) throw new Error(`class has no line ${k}`);
+      await moveTo(point.x, point.y);
+      return point;
+    };
+    await classLine(1);
+    await cdp.waitFor(`Number(getComputedStyle(document.querySelector(".grid-add-insert")).opacity) > 0.5`, {
+      label: "class line insert pill",
+    });
+    const classLinePills = await pills();
     check(
-      "a class grows only its field rows — it has no column handle",
-      classHandles.join("|") === ["เพิ่มแถวด้านบน", "ลบแถวบนสุด", "เพิ่มแถวด้านล่าง", "ลบแถวล่างสุด"].join("|"),
-      JSON.stringify(classHandles),
+      "a class offers an insert on its line and no column pill",
+      classLinePills.insert?.visible === true &&
+        classLinePills.insert.axis === "row" &&
+        classLinePills.insert.label === "แทรกแถวหรือคอลัมน์ตรงเส้นนี้" &&
+        classLinePills.row?.visible === false &&
+        classLinePills.col?.visible === false,
+      JSON.stringify(classLinePills),
     );
-    await cdp.evaluate(`document.querySelector('[data-axis="row"][data-side="bottom"][data-delta="1"]').click()`);
+    await clickPill(".grid-add-insert");
     await cdp.waitFor(`(() => {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore + 1};
     })()`.replace("__GRID__", firstClassGrid), { label: "class grew a field row" });
-    check("+ แถว adds a field to the class", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
-    await hoverFrame(firstClassGrid);
-    await cdp.evaluate(`document.querySelector('[data-axis="row"][data-side="bottom"][data-delta="-1"]').click()`);
+    check("+ on a class line inserts a field", (await classFields()) === fieldsBefore + 1, `${fieldsBefore} fields`);
+
+    await hoverIntoCell(firstClassGrid);
+    const classCellPills = await pills();
+    check(
+      "a class cell offers only the row removal",
+      classCellPills.row?.visible === true &&
+        classCellPills.row.label === "ลบแถวที่ชี้" &&
+        classCellPills.col?.visible === false &&
+        classCellPills.insert?.visible === false,
+      JSON.stringify(classCellPills),
+    );
+    await clickPill(".grid-add-row-del");
     await cdp.waitFor(`(() => {
       const frame = window.__boardsApi.getSceneElements().find((el) => el.customData?.grid === ${JSON.stringify("__GRID__")} && el.customData?.class && el.customData?.frame && !el.isDeleted);
       return (frame?.customData?.classData?.fields?.length || 0) === ${fieldsBefore};
     })()`.replace("__GRID__", firstClassGrid), { label: "class lost a field row" });
-    check("- แถว drops the last field of the class", (await classFields()) === fieldsBefore, `${fieldsBefore} fields`);
+    check("- on a class cell drops that field", (await classFields()) === fieldsBefore, `${fieldsBefore} fields`);
 
     /* two classes picked together are linked — never cloned */
     await openErPanel();

@@ -109,12 +109,6 @@ const GAP = 40;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const round = (n) => Math.round(n * 100) / 100;
-/** Which edge pill a grow/shrink on one axis and side presses. */
-const handleSide = (axis, side) => {
-  if (axis === "row") return side === "start" ? "top" : "bottom";
-  return side === "start" ? "left" : "right";
-};
-
 const near = (a, b, eps = EPS) => Math.abs(a - b) <= eps;
 /* Line breaks depend on the cell width and a squeezed value may end in "…", so
    text comparisons look at the characters only. */
@@ -1108,43 +1102,65 @@ class Page {
     await this.button("แทรกตารางใหม่");
   }
 
-  /** Hover the table a person has selected and read one edge pill's screen box. */
-  async gridHandle(axis, side, delta) {
-    const grid = this.lastCell?.grid || gridIds((await this.liveScene()).elements)[0];
-    if (!grid) throw new Fail("ui-missing", "no table to grow");
-    const cell = liveCells((await this.liveScene()).elements, grid)[0];
-    if (!cell) throw new Fail("ui-missing", `table ${grid} has no cells`);
-    await this.reveal(grid, cell.customData.r, cell.customData.c);
-    const point = await this.cellPoint(grid, cell.customData.r, cell.customData.c);
-    await this.cdp.mouse("mouseMoved", point.x, point.y);
-    await this.cdp.waitFor(`document.querySelector(".grid-add")?.classList.contains("visible")`, {
-      timeout: 4000,
-      label: "the on-table handles",
-    });
+  /** Screen box of a table: its edges and each row/column band. */
+  async tableBox(gridId) {
     const box = await this.cdp.evaluate(`(() => {
-      const el = document.querySelector('[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]');
-      if (!el) return null;
-      if (el.disabled) return { disabled: true };
-      const r = el.getBoundingClientRect();
-      if (!r.width || !r.height) return null;
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      // the panel floats over the canvas, so a pill near the right edge can sit
-      // underneath it; the caller then has to click the element itself
-      const covered = !el.contains(document.elementFromPoint(x, y));
-      return { x, y, covered };
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => !el.isDeleted && el.customData?.grid === ${JSON.stringify(gridId)} && typeof el.customData.r === "number" && typeof el.customData.c === "number");
+      if (!cells.length) return null;
+      const s = api.getAppState();
+      const zoom = s.zoom?.value || 1;
+      const host = document.querySelector(".canvas").getBoundingClientRect();
+      const sx = (x) => host.left + (x + (s.scrollX || 0)) * zoom;
+      const sy = (y) => host.top + (y + (s.scrollY || 0)) * zoom;
+      const rows = new Map();
+      const cols = new Map();
+      for (const el of cells) {
+        rows.set(el.customData.r, Math.max(rows.get(el.customData.r) ?? -Infinity, el.y + el.height));
+        cols.set(el.customData.c, Math.max(cols.get(el.customData.c) ?? -Infinity, el.x + el.width));
+      }
+      return {
+        left: sx(Math.min(...cells.map((el) => el.x))),
+        right: sx(Math.max(...cells.map((el) => el.x + el.width))),
+        top: sy(Math.min(...cells.map((el) => el.y))),
+        bottom: sy(Math.max(...cells.map((el) => el.y + el.height))),
+        rowBottoms: [...rows.keys()].sort((a, b) => a - b).map((r) => sy(rows.get(r))),
+        colRights: [...cols.keys()].sort((a, b) => a - b).map((c) => sx(cols.get(c))),
+        rows: rows.size,
+        cols: cols.size,
+      };
     })()`);
-    if (!box) throw new Fail("ui-missing", `no ${axis}/${side}/${delta} handle on ${grid}`);
-    if (box.disabled) throw new Fail("ui-missing", `the ${axis}/${side}/${delta} handle is disabled on ${grid}`);
-    return { grid, box, selector: `[data-axis="${axis}"][data-side="${side}"][data-delta="${delta}"]` };
+    if (!box) throw new Fail("ui-missing", `table ${gridId} has no cells`);
+    return box;
   }
 
   async liveScene() {
     return this.settle();
   }
 
-  /** Press one pill: a real mouse click when it is reachable, else the element itself. */
-  async pressHandle({ grid, box, selector }) {
+  /**
+   * Press one pill: a real mouse click when it is reachable, else the element
+   * itself when the floating panel covers it.
+   */
+  async pressPill(selector, dataset) {
+    const box = await this.cdp.evaluate(`(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      if (el.disabled) return { disabled: true };
+      const style = getComputedStyle(el);
+      if (Number(style.opacity) < 0.5) return null;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const covered = !el.contains(document.elementFromPoint(x, y));
+      return { x, y, covered, at: Number(el.dataset.at) };
+    })()`);
+    if (!box) throw new Fail("ui-missing", `${selector} is not visible`);
+    if (box.disabled) throw new Fail("ui-missing", `${selector} is disabled`);
+    if (dataset !== undefined && box.at !== dataset) {
+      throw new Fail("ui-missing", `${selector} points at ${box.at}, expected ${dataset}`);
+    }
     if (box.covered) {
       const clicked = await this.cdp.evaluate(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
@@ -1156,16 +1172,91 @@ class Page {
     } else {
       await this.cdp.clickPoint(box.x, box.y);
     }
-    await sleep(150);
+    await sleep(420);
+  }
+
+  /**
+   * Bring one track into view: a boundary that is scrolled off-screen (or under
+   * the floating panel) can never be hovered, so the track that owns it is
+   * centred first and the geometry is re-read afterwards.
+   */
+  async focusTrack(gridId, axis, at) {
+    await this.cdp.evaluate(`(() => {
+      const api = window.__boardsApi;
+      const cells = api.getSceneElements().filter((el) => !el.isDeleted && el.customData?.grid === ${JSON.stringify(gridId)} && typeof el.customData.r === "number" && typeof el.customData.c === "number");
+      if (!cells.length) return;
+      const axis = ${JSON.stringify(axis)};
+      const index = ${JSON.stringify(at)};
+      const count = axis === "row" ? Math.max(...cells.map((el) => el.customData.r)) + 1 : Math.max(...cells.map((el) => el.customData.c)) + 1;
+      const track = Math.max(0, Math.min(index > 0 ? index - 1 : 0, count - 1));
+      const cell = cells.find((el) => el.customData.r === (axis === "row" ? track : 0) && el.customData.c === (axis === "row" ? 0 : track));
+      if (cell) api.scrollToContent([cell], { fitToContent: false, animate: false });
+    })()`);
+    await sleep(220);
+    return this.tableBox(gridId);
+  }
+
+  /** Hover a grid line: rows at their bottom edge, columns at their right edge. */
+  async hoverLine(gridId, axis, at) {
+    const box = await this.focusTrack(gridId, axis, at);
+    const index = Math.max(0, Math.min(at, axis === "row" ? box.rowBottoms.length : box.colRights.length) - 1);
+    const x = Math.max(40, Math.min(axis === "row" ? box.left + 24 : box.colRights[index], 1200));
+    const y = Math.max(80, axis === "row" ? box.rowBottoms[index] : box.top + 24);
+    await this.cdp.mouse("mouseMoved", x, y);
+    await sleep(140);
+    return box;
+  }
+
+  /** Hover a cell of the track the removal should drop. */
+  async hoverTrack(gridId, axis, index) {
+    const box = await this.focusTrack(gridId, axis, index + 1);
+    const count = axis === "row" ? box.rows : box.cols;
+    const last = Math.max(0, count - 1);
+    const at = Math.max(0, Math.min(index, last));
+    const p = await this.cellPoint(gridId, axis === "row" ? at : 0, axis === "row" ? 0 : at);
+    await this.cdp.mouse("mouseMoved", p.x, p.y);
+    await sleep(120);
+    return box;
+  }
+
+  async grow(axis) {
+    const grid = this.lastCell?.grid || gridIds((await this.liveScene()).elements)[0];
+    if (!grid) throw new Fail("ui-missing", "no table to grow");
+    // + appends: the boundary after the last track is its far edge
+    await this.hoverLine(grid, axis, axis === "row" ? 1e6 : 1e6);
+    try {
+      await this.cdp.waitFor(`Number(getComputedStyle(document.querySelector(".grid-add-insert")).opacity) > 0.5`, {
+        timeout: 4000,
+        label: "the insert pill",
+      });
+    } catch (error) {
+      const diag = await this.cdp.evaluate(`(() => {
+        const s = window.__boardsApi.getAppState();
+        return {
+          zoom: s.zoom?.value, scrollX: s.scrollX, scrollY: s.scrollY,
+          pills: [...document.querySelectorAll(".grid-add-btn")].map((el) => ({
+            axis: el.dataset.axis, at: el.dataset.at, opacity: getComputedStyle(el).opacity,
+          })),
+          pointer: window.__soakPointer || null,
+        };
+      })()`);
+      throw new Fail("ui-missing", `${axis} insert pill never showed: ${JSON.stringify(diag)}`);
+    }
+    await this.pressPill(".grid-add-insert");
     return grid;
   }
 
-  async grow(axis, side = "end") {
-    return this.pressHandle(await this.gridHandle(axis, handleSide(axis, side), "1"));
-  }
-
-  async shrink(axis, side = "end") {
-    return this.pressHandle(await this.gridHandle(axis, handleSide(axis, side), "-1"));
+  async shrink(axis) {
+    const grid = this.lastCell?.grid || gridIds((await this.liveScene()).elements)[0];
+    if (!grid) throw new Fail("ui-missing", "no table to shrink");
+    const box = await this.tableBox(grid);
+    await this.hoverTrack(grid, axis, (axis === "row" ? box.rows : box.cols) - 1);
+    await this.cdp.waitFor(`Number(getComputedStyle(document.querySelector(${JSON.stringify(axis === "row" ? ".grid-add-row-del" : ".grid-add-col-del")})).opacity) > 0.5`, {
+      timeout: 4000,
+      label: "the removal pill",
+    });
+    await this.pressPill(axis === "row" ? ".grid-add-row-del" : ".grid-add-col-del");
+    return grid;
   }
 
   /**
