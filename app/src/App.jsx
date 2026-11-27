@@ -4,7 +4,6 @@ import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import TableBuilder from "./TableBuilder.jsx";
 import ErBuilder from "./ErBuilder.jsx";
-import GridOverlay from "./GridOverlay.jsx";
 import {
   buildClass,
   classRowAt,
@@ -293,7 +292,6 @@ export default function App() {
   const [selectedRelation, setSelectedRelation] = useState(null);
   // class grids highlighted together — the ER panel links two of them
   const [classPicks, setClassPicks] = useState([]);
-  const [activeCell, setActiveCell] = useState(null);
   const [peers, setPeers] = useState([]);
   const [live, setLive] = useState("connecting"); // connecting | open | closed
   const [title, setTitle] = useState(boardId || "");
@@ -1890,34 +1888,6 @@ export default function App() {
 
   /* Which cell did the user just click? The table panel uses it to aim the
      row/column size fields and the overlay highlights that row and column. */
-  useEffect(() => {
-    if (phase !== "ready") return undefined;
-    const host = canvasRef.current;
-    if (!host) return undefined;
-    const onDown = (event) => {
-      const api = apiRef.current;
-      if (!api || event.button !== 0) return;
-      const state = api.getAppState();
-      const zoom = state.zoom?.value || 1;
-      const rect = host.getBoundingClientRect();
-      const sceneX = (event.clientX - rect.left) / zoom - (state.scrollX || 0);
-      const sceneY = (event.clientY - rect.top) / zoom - (state.scrollY || 0);
-      const cell = api.getSceneElements().find(
-        (el) =>
-          isGridCell(el) &&
-          sceneX >= el.x &&
-          sceneX <= el.x + el.width &&
-          sceneY >= el.y &&
-          sceneY <= el.y + el.height,
-      );
-      setActiveCell(
-        cell ? { grid: cell.customData.grid, r: cell.customData.r, c: cell.customData.c } : null,
-      );
-    };
-    host.addEventListener("pointerdown", onDown, true);
-    return () => host.removeEventListener("pointerdown", onDown, true);
-  }, [phase, scene]);
-
   /* The +/- control is a scene element, so it travels with the class. Catching
      its pointerdown before Excalidraw selects the group keeps the click a
      toggle instead of a drag/selection. */
@@ -2248,7 +2218,6 @@ export default function App() {
             window.__boardsApi = api; // handy for the e2e harness
           }}
         />
-        <GridOverlay apiRef={apiRef} canvasRef={canvasRef} activeCell={activeCell} />
         <GridAddControl apiRef={apiRef} canvasRef={canvasRef} onChange={changeGridFromHandle} />
         <GridResizeControl
           apiRef={apiRef}

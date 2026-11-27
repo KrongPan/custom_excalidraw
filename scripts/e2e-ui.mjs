@@ -926,6 +926,17 @@ async function openEditor(boardId = BOARD) {
     const typed = await textCell();
     check("the first cell keeps the typed word", typed?.r === 0 && typed?.c === 0, JSON.stringify(typed));
 
+    /* a single click on a cell must not paint the old row/column band or badge */
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: firstCell.x, y: firstCell.y, button: "none", buttons: 0 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: firstCell.x, y: firstCell.y, button: "left", buttons: 1, clickCount: 1 });
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: firstCell.x, y: firstCell.y, button: "left", buttons: 0, clickCount: 1 });
+    await sleep(300);
+    const painted = await cdp.evaluate(`(() => ({
+      overlay: Boolean(document.querySelector(".grid-overlay")),
+      badge: [...document.querySelectorAll("div")].some((el) => /^แถว \\d+ · คอลัมน์ \\d+$/.test((el.textContent || "").trim())),
+    }))()`);
+    check("clicking a cell paints no row/column highlight", painted && painted.overlay === false && painted.badge === false, JSON.stringify(painted));
+
     const rows0 = tableBefore.rows;
     const cols0 = tableBefore.cols;
 

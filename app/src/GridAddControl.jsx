@@ -7,7 +7,7 @@ import { tableBounds } from "./table.js";
    that side, and every pair only ever edits the same grid, so nothing spawns a
    second table.
 
-   Like GridOverlay it paints into an overlay above the Excalidraw canvases and
+   It paints into an overlay above the Excalidraw canvases and
    reads scene geometry every frame, so panning/zooming keeps the buttons glued
    to the table without a React render per frame: only entering or leaving a
    table flips state, every other frame writes styles straight to the DOM. */
