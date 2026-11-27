@@ -1076,6 +1076,31 @@ async function openEditor(boardId = BOARD) {
       JSON.stringify(outsideBorderView.row),
     );
 
+    /* the band outside the border has to be walkable: from just off the border
+       the pointer can travel out onto the pill itself and it stays up, so the
+       removal is something a hand can actually press, not just a sliver */
+    let walkLost = null;
+    const walkFrom = insideGeom.table.left - 4;
+    for (let step = 1; step <= 6; step += 1) {
+      const x = walkFrom + ((outsideBorderView.row.cx - walkFrom) * step) / 6;
+      await moveTo(x, rowMid);
+      const walkView = await cdp.evaluate(`(() => {
+        const el = document.querySelector(".grid-add-row-del");
+        if (!el) return null;
+        return { visible: Number(getComputedStyle(el).opacity) > 0.5, at: Number(el.dataset.at) };
+      })()`);
+      if (!walkView?.visible || walkView.at !== 1) {
+        walkLost = { step, x, walkView };
+        break;
+      }
+    }
+    check(
+      "the removal stays up while the pointer walks out onto it",
+      !walkLost,
+      JSON.stringify(walkLost || { cx: outsideBorderView.row.cx, from: walkFrom }),
+    );
+    await moveTo(walkFrom, rowMid);
+
     /* the top border drops the column it is level with */
     const topGeom = await hoverTopBorder(1);
     await waitPill(".grid-add-col-del", 1);
